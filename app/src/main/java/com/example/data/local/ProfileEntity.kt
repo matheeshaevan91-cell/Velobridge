@@ -27,18 +27,20 @@ data class ProfileEntity(
     val allowInsecure: Boolean,
     val tlsFingerprint: String,
     val isPhoneBridge: Boolean,
+    val isFavorite: Boolean = false,
     val latencyMs: Long?,
     val lastTestedAt: Long?,
+    val lastConnectedAt: Long? = null,
     val createdAt: Long,
     val rawJsonOverride: String?
 ) {
-    fun toDomain(): V2RayProfile = V2RayProfile(
+    fun toDomain(secretDecoder: (String) -> String = { it }): V2RayProfile = V2RayProfile(
         id = id,
         name = name,
         protocol = runCatching { ProtocolType.valueOf(protocol) }.getOrDefault(ProtocolType.VLESS),
         address = address,
         port = port,
-        uuidOrPassword = uuidOrPassword,
+        uuidOrPassword = secretDecoder(uuidOrPassword),
         encryption = runCatching { EncryptionCipher.valueOf(encryption) }
             .getOrDefault(EncryptionCipher.AES_256_GCM),
         transport = runCatching { TransportType.valueOf(transport) }
@@ -53,20 +55,25 @@ data class ProfileEntity(
         tlsFingerprint = runCatching { TlsFingerprint.valueOf(tlsFingerprint) }
             .getOrDefault(TlsFingerprint.CHROME),
         isPhoneBridge = isPhoneBridge,
+        isFavorite = isFavorite,
         latencyMs = latencyMs,
         lastTestedAt = lastTestedAt,
+        lastConnectedAt = lastConnectedAt,
         createdAt = createdAt,
         rawJsonOverride = rawJsonOverride
     )
 
     companion object {
-        fun fromDomain(profile: V2RayProfile): ProfileEntity = ProfileEntity(
+        fun fromDomain(
+            profile: V2RayProfile,
+            secretEncoder: (String) -> String = { it }
+        ): ProfileEntity = ProfileEntity(
             id = profile.id,
             name = profile.name,
             protocol = profile.protocol.name,
             address = profile.address,
             port = profile.port,
-            uuidOrPassword = profile.uuidOrPassword,
+            uuidOrPassword = secretEncoder(profile.uuidOrPassword),
             encryption = profile.encryption.name,
             transport = profile.transport.name,
             disguisePresetId = profile.disguisePresetId,
@@ -78,8 +85,10 @@ data class ProfileEntity(
             allowInsecure = profile.allowInsecure,
             tlsFingerprint = profile.tlsFingerprint.name,
             isPhoneBridge = profile.isPhoneBridge,
+            isFavorite = profile.isFavorite,
             latencyMs = profile.latencyMs,
             lastTestedAt = profile.lastTestedAt,
+            lastConnectedAt = profile.lastConnectedAt,
             createdAt = profile.createdAt,
             rawJsonOverride = profile.rawJsonOverride
         )

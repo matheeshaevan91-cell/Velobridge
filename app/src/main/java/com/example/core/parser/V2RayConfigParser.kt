@@ -13,23 +13,61 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLDecoder
 import java.net.URLEncoder
-import java.util.UUID
 
 sealed class ParseImportResult {
     data class Success(val profiles: List<V2RayProfile>) : ParseImportResult()
     data class Error(val reason: String) : ParseImportResult()
 }
 
+data class BulkImportResult(
+    val profiles: List<V2RayProfile>,
+    val failedEntries: List<String>
+)
+
+data class DuplicateAnalysis(
+    val unique: List<V2RayProfile>,
+    val duplicates: List<V2RayProfile>
+)
+
 object V2RayConfigParser {
 
     fun parseInput(rawInput: String): ParseImportResult {
         val trimmed = rawInput.trim()
         if (trimmed.isEmpty()) {
-            return ParseImportResult.Error("Input is empty. Paste a vmess://, vless://, trojan://, ss://, velobridge:// link or Xray JSON config.")
+            return ParseImportResult.Error(
+                "Input is empty. Paste a vmess://, vless://, trojan://, ss://, velobridge:// link or Xray JSON config."
+            )
         }
 
         if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
             return parseXrayJson(trimmed)
+        }
+
+        val bulk = parseBulkInput(trimmed)
+        if (bulk.profiles.isNotEmpty() && bulk.failedEntries.isEmpty()) {
+            return ParseImportResult.Success(bulk.profiles)
+        }
+        if (bulk.profiles.isNotEmpty() && bulk.failedEntries.isNotEmpty()) {
+            // Strict mode: surface exact failure if caller uses parseInput expecting all lines valid,
+            // while bulk UI uses parseBulkInput to report partial imports cleanly.
+            return ParseImportResult.Success(bulk.profiles)
+        }
+        return ParseImportResult.Error(
+            bulk.failedEntries.firstOrNull()
+                ?: "Could not recognize configuration format. Supported: vless://, vmess://, trojan://, ss://, velobridge://, or Xray JSON."
+        )
+    }
+
+    fun parseBulkInput(rawInput: String): BulkImportResult {
+        val trimmed = rawInput.trim()
+        if (trimmed.isEmpty()) {
+            return BulkImportResult(emptyList(), listOf("Input is empty."))
+        }
+        if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+            return when (val jsonRes = parseXrayJson(trimmed)) {
+                is ParseImportResult.Success -> BulkImportResult(jsonRes.profiles, emptyList())
+                is ParseImportResult.Error -> BulkImportResult(emptyList(), listOf(jsonRes.reason))
+            }
         }
 
         val lines = trimmed.lines()
@@ -37,247 +75,297 @@ object V2RayConfigParser {
             .filter { it.isNotEmpty() && !it.startsWith("#") }
 
         val parsed = mutableListOf<V2RayProfile>()
-        val errors = mutableListOf<String>()
+        val failed = mutableListOf<String>()
 
-        for (line in lines) {
-            val result = when {
-                line.startsWith("velobridge://", ignoreCase = true) -> parseVeloBridgeUri(line)
-                line.startsWith("vless://", ignoreCase = true) -> parseVlessUri(line)
-                line.startsWith("vmess://", ignoreCase = true) -> parseVmessUri(line)
-                line.startsWith("trojan://", ignoreCase = true) -> parseTrojanUri(line)
-                line.startsWith("ss://", ignoreCase = true) -> parseShadowsocksUri(line)
-                else -> null
+        lines.forEachIndexed { idx, line ->
+            val lineNum = idx + 1
+            val outcome = when {
+                line.startsWith("velobridge://", ignoreCase = true) -> parseVeloBridgeUriStrict(line)
+                line.startsWith("vless://", ignoreCase = true) -> parseVlessUriStrict(line)
+                line.startsWith("vmess://", ignoreCase = true) -> parseVmessUriStrict(line)
+                line.startsWith("trojan://", ignoreCase = true) -> parseTrojanUriStrict(line)
+                line.startsWith("ss://", ignoreCase = true) -> parseShadowsocksUriStrict(line)
+                else -> Result.failure(IllegalArgumentException("Unsupported URI scheme"))
             }
-            if (result != null) {
-                parsed.add(result)
-            } else {
-                errors.add(line.take(36))
+            outcome.onSuccess { profile ->
+                parsed.add(profile)
+            }.onFailure { err ->
+                failed.add("Line $lineNum: ${err.message ?: "Malformed configuration"}")
             }
         }
 
-        return if (parsed.isNotEmpty()) {
-            ParseImportResult.Success(parsed)
+        return BulkImportResult(profiles = parsed, failedEntries = failed)
+    }
+
+    fun findDuplicates(
+        incoming: List<V2RayProfile>,
+        existing: List<V2RayProfile>
+    ): DuplicateAnalysis {
+        val existingFingerprints = existing.mapTo(mutableSetOf()) { it.endpointFingerprint }
+        val seenBatch = mutableSetOf<String>()
+        val unique = mutableListOf<V2RayProfile>()
+        val duplicates = mutableListOf<V2RayProfile>()
+
+        for (profile in incoming) {
+            val fp = profile.endpointFingerprint
+            if (fp in existingFingerprints || fp in seenBatch) {
+                duplicates.add(profile)
+            } else {
+                seenBatch.add(fp)
+                unique.add(profile)
+            }
+        }
+        return DuplicateAnalysis(unique = unique, duplicates = duplicates)
+    }
+
+    private fun extractValidatedPort(uri: Uri, defaultPort: Int): Int {
+        val authority = uri.encodedAuthority.orEmpty()
+        val afterAt = authority.substringAfterLast('@', authority)
+        val hasExplicitColon = if (afterAt.startsWith("[")) {
+            afterAt.substringAfter(']', "").contains(':')
         } else {
-            ParseImportResult.Error(
-                "Could not recognize configuration format (${errors.firstOrNull() ?: "unknown"}). Supported: vless://, vmess://, trojan://, ss://, velobridge://, or V2Ray JSON."
-            )
+            afterAt.contains(':')
+        }
+        val port = uri.port
+        if (hasExplicitColon) {
+            if (port !in 1..65535) {
+                throw IllegalArgumentException("Invalid port in URI (must be 1–65535)")
+            }
+            return port
+        }
+        return if (port == -1) defaultPort else {
+            require(port in 1..65535) { "Invalid port $port (must be 1–65535)" }
+            port
         }
     }
 
-    private fun parseVeloBridgeUri(uriText: String): V2RayProfile? {
-        return runCatching {
-            val uri = Uri.parse(uriText)
-            val uuid = uri.userInfo?.takeIf { it.isNotBlank() } ?: return null
-            val host = uri.host?.takeIf { it.isNotBlank() } ?: return null
-            val port = uri.port.takeIf { it in 1..65535 } ?: 10808
-            val remarks = uri.fragment?.let { urlDecode(it) }?.takeIf { it.isNotBlank() }
-                ?: "Phone Bridge ($host)"
-            val disguiseId = uri.getQueryParameter("disguise") ?: "youtube"
-            val domain = uri.getQueryParameter("sni")
-                ?: uri.getQueryParameter("host")
-                ?: DisguiseCatalog.findById(disguiseId).domain
-            val wsPath = uri.getQueryParameter("path") ?: DisguiseCatalog.findById(disguiseId).wsPath
-            val cipherRaw = uri.getQueryParameter("cipher") ?: "aes-256-gcm"
-            val cipher = EncryptionCipher.entries.find { it.wireValue.equals(cipherRaw, true) }
-                ?: EncryptionCipher.AES_256_GCM
+    private fun parseVeloBridgeUriStrict(uriText: String): Result<V2RayProfile> = runCatching {
+        val uri = Uri.parse(uriText)
+        val uuid = uri.userInfo?.takeIf { it.isNotBlank() }
+            ?: throw IllegalArgumentException("velobridge:// missing bridge secret UUID")
+        val host = uri.host?.takeIf { it.isNotBlank() }
+            ?: throw IllegalArgumentException("velobridge:// missing server IP or hostname")
+        val port = extractValidatedPort(uri, 10808)
+        val remarks = uri.fragment?.let { urlDecode(it) }?.takeIf { it.isNotBlank() }
+            ?: "Phone Bridge ($host)"
+        val disguiseId = uri.getQueryParameter("disguise") ?: "youtube"
+        val domain = uri.getQueryParameter("sni")
+            ?: uri.getQueryParameter("host")
+            ?: DisguiseCatalog.findById(disguiseId).domain
+        val wsPath = uri.getQueryParameter("path") ?: DisguiseCatalog.findById(disguiseId).wsPath
+        val cipherRaw = uri.getQueryParameter("cipher") ?: "aes-256-gcm"
+        val cipher = EncryptionCipher.entries.find { it.wireValue.equals(cipherRaw, true) }
+            ?: EncryptionCipher.AES_256_GCM
 
-            V2RayProfile(
-                name = remarks,
-                protocol = ProtocolType.VELO_BRIDGE,
-                address = host,
-                port = port,
-                uuidOrPassword = uuid,
-                encryption = cipher,
-                transport = TransportType.WEBSOCKET,
-                disguisePresetId = matchPresetId(domain, disguiseId),
-                customDisguiseDomain = if (matchPresetId(domain, disguiseId) == "custom") domain else "",
-                sni = domain,
-                hostHeader = domain,
-                wsPath = wsPath,
-                tlsEnabled = true,
-                isPhoneBridge = true
-            )
-        }.getOrNull()
+        V2RayProfile(
+            name = remarks,
+            protocol = ProtocolType.VELO_BRIDGE,
+            address = host,
+            port = port,
+            uuidOrPassword = uuid,
+            encryption = cipher,
+            transport = TransportType.WEBSOCKET,
+            disguisePresetId = matchPresetId(domain, disguiseId),
+            customDisguiseDomain = if (matchPresetId(domain, disguiseId) == "custom") domain else "",
+            sni = domain,
+            hostHeader = domain,
+            wsPath = wsPath,
+            tlsEnabled = true,
+            isPhoneBridge = true
+        )
     }
 
-    private fun parseVlessUri(uriText: String): V2RayProfile? {
-        return runCatching {
-            val uri = Uri.parse(uriText)
-            val uuid = uri.userInfo?.takeIf { it.isNotBlank() } ?: return null
-            val host = uri.host?.takeIf { it.isNotBlank() } ?: return null
-            val port = uri.port.takeIf { it in 1..65535 } ?: 443
-            val remarks = uri.fragment?.let { urlDecode(it) }?.takeIf { it.isNotBlank() }
-                ?: "VLESS $host"
+    private fun parseVlessUriStrict(uriText: String): Result<V2RayProfile> = runCatching {
+        val uri = Uri.parse(uriText)
+        val uuid = uri.userInfo?.takeIf { it.isNotBlank() }
+            ?: throw IllegalArgumentException("vless:// missing UUID")
+        val host = uri.host?.takeIf { it.isNotBlank() }
+            ?: throw IllegalArgumentException("vless:// missing server host")
+        val port = extractValidatedPort(uri, 443)
+        val remarks = uri.fragment?.let { urlDecode(it) }?.takeIf { it.isNotBlank() }
+            ?: "VLESS $host"
 
-            val typeRaw = uri.getQueryParameter("type") ?: "tcp"
-            val transport = when (typeRaw.lowercase()) {
-                "ws", "websocket" -> TransportType.WEBSOCKET
-                "grpc" -> TransportType.GRPC
-                "http", "tcp-http" -> TransportType.TCP_HTTP
-                else -> TransportType.TCP
-            }
-            val security = uri.getQueryParameter("security") ?: "tls"
-            val sni = uri.getQueryParameter("sni") ?: uri.getQueryParameter("host") ?: host
-            val hostHdr = uri.getQueryParameter("host") ?: sni
-            val path = uri.getQueryParameter("path")?.let { urlDecode(it) } ?: "/ray"
-            val fpRaw = uri.getQueryParameter("fp") ?: "chrome"
-            val fp = TlsFingerprint.entries.find { it.wireValue.equals(fpRaw, true) } ?: TlsFingerprint.CHROME
-            val allowInsecure = uri.getQueryParameter("allowInsecure") == "1" ||
-                uri.getQueryParameter("allowInsecure") == "true"
-            val isBridge = uri.getQueryParameter("bridge") == "1"
-            val presetId = matchPresetId(sni.ifBlank { hostHdr })
+        val typeRaw = uri.getQueryParameter("type") ?: "tcp"
+        val transport = when (typeRaw.lowercase()) {
+            "ws", "websocket" -> TransportType.WEBSOCKET
+            "grpc" -> TransportType.GRPC
+            "http", "tcp-http" -> TransportType.TCP_HTTP
+            else -> TransportType.TCP
+        }
+        val security = uri.getQueryParameter("security") ?: "tls"
+        val sni = uri.getQueryParameter("sni") ?: uri.getQueryParameter("host") ?: host
+        val hostHdr = uri.getQueryParameter("host") ?: sni
+        val path = uri.getQueryParameter("path")?.let { urlDecode(it) } ?: "/ray"
+        val fpRaw = uri.getQueryParameter("fp") ?: "chrome"
+        val fp = TlsFingerprint.entries.find { it.wireValue.equals(fpRaw, true) } ?: TlsFingerprint.CHROME
+        val allowInsecure = uri.getQueryParameter("allowInsecure") == "1" ||
+            uri.getQueryParameter("allowInsecure") == "true"
+        val isBridge = uri.getQueryParameter("bridge") == "1"
+        val presetId = matchPresetId(sni.ifBlank { hostHdr })
 
-            V2RayProfile(
-                name = remarks,
-                protocol = if (isBridge) ProtocolType.VELO_BRIDGE else ProtocolType.VLESS,
-                address = host,
-                port = port,
-                uuidOrPassword = uuid,
-                encryption = if (isBridge) EncryptionCipher.AES_256_GCM else EncryptionCipher.NONE,
-                transport = transport,
-                disguisePresetId = presetId,
-                customDisguiseDomain = if (presetId == "custom") sni else "",
-                sni = sni,
-                hostHeader = hostHdr,
-                wsPath = path,
-                tlsEnabled = !security.equals("none", ignoreCase = true),
-                allowInsecure = allowInsecure,
-                tlsFingerprint = fp,
-                isPhoneBridge = isBridge
-            )
-        }.getOrNull()
+        V2RayProfile(
+            name = remarks,
+            protocol = if (isBridge) ProtocolType.VELO_BRIDGE else ProtocolType.VLESS,
+            address = host,
+            port = port,
+            uuidOrPassword = uuid,
+            encryption = if (isBridge) EncryptionCipher.AES_256_GCM else EncryptionCipher.NONE,
+            transport = transport,
+            disguisePresetId = presetId,
+            customDisguiseDomain = if (presetId == "custom") sni else "",
+            sni = sni,
+            hostHeader = hostHdr,
+            wsPath = path,
+            tlsEnabled = !security.equals("none", ignoreCase = true),
+            allowInsecure = allowInsecure,
+            tlsFingerprint = fp,
+            isPhoneBridge = isBridge
+        )
     }
 
-    private fun parseVmessUri(uriText: String): V2RayProfile? {
-        return runCatching {
-            val encoded = uriText.removePrefix("vmess://").trim()
-            val decoded = decodeBase64Flexible(encoded) ?: return null
-            val json = JSONObject(decoded)
-            val address = json.optString("add").takeIf { it.isNotBlank() } ?: return null
-            val port = json.optInt("port", json.optString("port").toIntOrNull() ?: 443)
-            val uuid = json.optString("id").takeIf { it.isNotBlank() } ?: return null
-            val remarks = json.optString("ps").takeIf { it.isNotBlank() } ?: "VMess $address"
-            val net = json.optString("net", "ws")
-            val transport = when (net.lowercase()) {
-                "ws" -> TransportType.WEBSOCKET
-                "grpc" -> TransportType.GRPC
-                "h2", "http" -> TransportType.TCP_HTTP
-                else -> TransportType.TCP
-            }
-            val hostHdr = json.optString("host").ifBlank { address }
-            val sni = json.optString("sni").ifBlank { hostHdr }
-            val path = json.optString("path").ifBlank { "/ray" }
-            val tls = json.optString("tls").equals("tls", ignoreCase = true)
-            val scy = json.optString("scy", "auto")
-            val cipher = EncryptionCipher.entries.find { it.wireValue.equals(scy, true) }
-                ?: EncryptionCipher.AUTO
-            val presetId = matchPresetId(sni.ifBlank { hostHdr })
+    private fun parseVmessUriStrict(uriText: String): Result<V2RayProfile> = runCatching {
+        val encoded = uriText.removePrefix("vmess://").trim()
+        val decoded = decodeBase64Flexible(encoded)
+            ?: throw IllegalArgumentException("vmess:// contains invalid Base64 payload")
+        val json = runCatching { JSONObject(decoded) }.getOrElse {
+            throw IllegalArgumentException("vmess:// payload is not valid JSON")
+        }
+        val address = json.optString("add").trim().takeIf { it.isNotBlank() }
+            ?: throw IllegalArgumentException("vmess:// missing server address ('add')")
+        val portRaw = if (json.has("port")) json.optString("port").toIntOrNull() else 443
+        val port = portRaw?.takeIf { it in 1..65535 }
+            ?: throw IllegalArgumentException("vmess:// invalid port (must be 1–65535)")
+        val uuid = json.optString("id").trim().takeIf { it.isNotBlank() }
+            ?: throw IllegalArgumentException("vmess:// missing user UUID ('id')")
+        val remarks = json.optString("ps").takeIf { it.isNotBlank() } ?: "VMess $address"
+        val net = json.optString("net", "ws")
+        val transport = when (net.lowercase()) {
+            "ws" -> TransportType.WEBSOCKET
+            "grpc" -> TransportType.GRPC
+            "h2", "http" -> TransportType.TCP_HTTP
+            else -> TransportType.TCP
+        }
+        val hostHdr = json.optString("host").ifBlank { address }
+        val sni = json.optString("sni").ifBlank { hostHdr }
+        val path = json.optString("path").ifBlank { "/ray" }
+        val tls = json.optString("tls").equals("tls", ignoreCase = true)
+        val scy = json.optString("scy", "auto")
+        val cipher = EncryptionCipher.entries.find { it.wireValue.equals(scy, true) }
+            ?: EncryptionCipher.AUTO
+        val presetId = matchPresetId(sni.ifBlank { hostHdr })
 
-            V2RayProfile(
-                name = remarks,
-                protocol = ProtocolType.VMESS,
-                address = address,
-                port = port,
-                uuidOrPassword = uuid,
-                encryption = cipher,
-                transport = transport,
-                disguisePresetId = presetId,
-                customDisguiseDomain = if (presetId == "custom") sni else "",
-                sni = sni,
-                hostHeader = hostHdr,
-                wsPath = path,
-                tlsEnabled = tls
-            )
-        }.getOrNull()
+        V2RayProfile(
+            name = remarks,
+            protocol = ProtocolType.VMESS,
+            address = address,
+            port = port,
+            uuidOrPassword = uuid,
+            encryption = cipher,
+            transport = transport,
+            disguisePresetId = presetId,
+            customDisguiseDomain = if (presetId == "custom") sni else "",
+            sni = sni,
+            hostHeader = hostHdr,
+            wsPath = path,
+            tlsEnabled = tls
+        )
     }
 
-    private fun parseTrojanUri(uriText: String): V2RayProfile? {
-        return runCatching {
-            val uri = Uri.parse(uriText)
-            val password = uri.userInfo?.takeIf { it.isNotBlank() } ?: return null
-            val host = uri.host?.takeIf { it.isNotBlank() } ?: return null
-            val port = uri.port.takeIf { it in 1..65535 } ?: 443
-            val remarks = uri.fragment?.let { urlDecode(it) }?.takeIf { it.isNotBlank() }
-                ?: "Trojan $host"
-            val sni = uri.getQueryParameter("sni") ?: uri.getQueryParameter("peer") ?: host
-            val hostHdr = uri.getQueryParameter("host") ?: sni
-            val path = uri.getQueryParameter("path")?.let { urlDecode(it) } ?: "/"
-            val typeRaw = uri.getQueryParameter("type") ?: "tcp"
-            val transport = if (typeRaw.equals("ws", true)) TransportType.WEBSOCKET else TransportType.TCP
-            val presetId = matchPresetId(sni)
+    private fun parseTrojanUriStrict(uriText: String): Result<V2RayProfile> = runCatching {
+        val uri = Uri.parse(uriText)
+        val password = uri.userInfo?.takeIf { it.isNotBlank() }
+            ?: throw IllegalArgumentException("trojan:// missing password")
+        val host = uri.host?.takeIf { it.isNotBlank() }
+            ?: throw IllegalArgumentException("trojan:// missing server host")
+        val port = extractValidatedPort(uri, 443)
+        val remarks = uri.fragment?.let { urlDecode(it) }?.takeIf { it.isNotBlank() }
+            ?: "Trojan $host"
+        val sni = uri.getQueryParameter("sni") ?: uri.getQueryParameter("peer") ?: host
+        val hostHdr = uri.getQueryParameter("host") ?: sni
+        val path = uri.getQueryParameter("path")?.let { urlDecode(it) } ?: "/"
+        val typeRaw = uri.getQueryParameter("type") ?: "tcp"
+        val transport = if (typeRaw.equals("ws", true)) TransportType.WEBSOCKET else TransportType.TCP
+        val presetId = matchPresetId(sni)
 
-            V2RayProfile(
-                name = remarks,
-                protocol = ProtocolType.TROJAN,
-                address = host,
-                port = port,
-                uuidOrPassword = password,
-                encryption = EncryptionCipher.AES_256_GCM,
-                transport = transport,
-                disguisePresetId = presetId,
-                customDisguiseDomain = if (presetId == "custom") sni else "",
-                sni = sni,
-                hostHeader = hostHdr,
-                wsPath = path,
-                tlsEnabled = true
-            )
-        }.getOrNull()
+        V2RayProfile(
+            name = remarks,
+            protocol = ProtocolType.TROJAN,
+            address = host,
+            port = port,
+            uuidOrPassword = password,
+            encryption = EncryptionCipher.AES_256_GCM,
+            transport = transport,
+            disguisePresetId = presetId,
+            customDisguiseDomain = if (presetId == "custom") sni else "",
+            sni = sni,
+            hostHeader = hostHdr,
+            wsPath = path,
+            tlsEnabled = true
+        )
     }
 
-    private fun parseShadowsocksUri(uriText: String): V2RayProfile? {
-        return runCatching {
-            val withoutScheme = uriText.removePrefix("ss://")
-            val hashIdx = withoutScheme.indexOf('#')
-            val remarks = if (hashIdx >= 0) {
-                urlDecode(withoutScheme.substring(hashIdx + 1)).ifBlank { "Shadowsocks" }
+    private fun parseShadowsocksUriStrict(uriText: String): Result<V2RayProfile> = runCatching {
+        val withoutScheme = uriText.removePrefix("ss://")
+        val hashIdx = withoutScheme.indexOf('#')
+        val remarks = if (hashIdx >= 0) {
+            urlDecode(withoutScheme.substring(hashIdx + 1)).ifBlank { "Shadowsocks" }
+        } else {
+            "Shadowsocks"
+        }
+        val mainPart = if (hashIdx >= 0) withoutScheme.substring(0, hashIdx) else withoutScheme
+        val queryIdx = mainPart.indexOf('?')
+        val corePart = if (queryIdx >= 0) mainPart.substring(0, queryIdx) else mainPart
+
+        val decodedCore = if (corePart.contains("@")) {
+            val atIdx = corePart.lastIndexOf('@')
+            val userInfo = corePart.substring(0, atIdx)
+            val hostPort = corePart.substring(atIdx + 1)
+            val decodedCreds = if (userInfo.contains(":")) {
+                userInfo
             } else {
-                "Shadowsocks"
+                decodeBase64Flexible(userInfo)
+                    ?: throw IllegalArgumentException("ss:// invalid Base64 credentials")
             }
-            val mainPart = if (hashIdx >= 0) withoutScheme.substring(0, hashIdx) else withoutScheme
-            val queryIdx = mainPart.indexOf('?')
-            val corePart = if (queryIdx >= 0) mainPart.substring(0, queryIdx) else mainPart
+            "$decodedCreds@$hostPort"
+        } else {
+            decodeBase64Flexible(corePart)
+                ?: throw IllegalArgumentException("ss:// invalid Base64 configuration")
+        }
 
-            val decodedCore = if (corePart.contains("@")) {
-                val atIdx = corePart.lastIndexOf('@')
-                val userInfo = corePart.substring(0, atIdx)
-                val hostPort = corePart.substring(atIdx + 1)
-                val decodedCreds = if (userInfo.contains(":")) userInfo else (decodeBase64Flexible(userInfo) ?: userInfo)
-                "$decodedCreds@$hostPort"
-            } else {
-                decodeBase64Flexible(corePart) ?: return null
-            }
+        val atIdx = decodedCore.lastIndexOf('@')
+        if (atIdx < 0) throw IllegalArgumentException("ss:// missing '@' host separator")
+        val creds = decodedCore.substring(0, atIdx)
+        val hostPort = decodedCore.substring(atIdx + 1)
+        val colonCred = creds.indexOf(':')
+        val method = if (colonCred >= 0) creds.substring(0, colonCred) else "aes-256-gcm"
+        val password = (if (colonCred >= 0) creds.substring(colonCred + 1) else creds).trim()
+        if (password.isEmpty()) throw IllegalArgumentException("ss:// missing password")
 
-            val atIdx = decodedCore.lastIndexOf('@')
-            if (atIdx < 0) return null
-            val creds = decodedCore.substring(0, atIdx)
-            val hostPort = decodedCore.substring(atIdx + 1)
-            val colonCred = creds.indexOf(':')
-            val method = if (colonCred >= 0) creds.substring(0, colonCred) else "aes-256-gcm"
-            val password = if (colonCred >= 0) creds.substring(colonCred + 1) else creds
-            val lastColonHost = hostPort.lastIndexOf(':')
-            if (lastColonHost < 0) return null
-            val host = hostPort.substring(0, lastColonHost).trim('[', ']')
-            val port = hostPort.substring(lastColonHost + 1).toIntOrNull() ?: return null
+        val lastColonHost = hostPort.lastIndexOf(':')
+        if (lastColonHost < 0) throw IllegalArgumentException("ss:// missing ':port'")
+        val host = hostPort.substring(0, lastColonHost).trim('[', ']', ' ')
+        if (host.isEmpty()) throw IllegalArgumentException("ss:// missing server host")
+        val port = hostPort.substring(lastColonHost + 1).toIntOrNull()?.takeIf { it in 1..65535 }
+            ?: throw IllegalArgumentException("ss:// invalid port (must be 1–65535)")
 
-            val cipher = when {
-                method.contains("chacha", true) -> EncryptionCipher.CHACHA20_POLY1305
-                else -> EncryptionCipher.AES_256_GCM
-            }
+        val cipher = when {
+            method.contains("chacha", true) -> EncryptionCipher.CHACHA20_POLY1305
+            else -> EncryptionCipher.AES_256_GCM
+        }
 
-            V2RayProfile(
-                name = remarks,
-                protocol = ProtocolType.SHADOWSOCKS,
-                address = host,
-                port = port,
-                uuidOrPassword = password,
-                encryption = cipher,
-                transport = TransportType.TCP,
-                disguisePresetId = "youtube",
-                sni = "www.youtube.com",
-                hostHeader = "www.youtube.com",
-                tlsEnabled = false
-            )
-        }.getOrNull()
+        V2RayProfile(
+            name = remarks,
+            protocol = ProtocolType.SHADOWSOCKS,
+            address = host,
+            port = port,
+            uuidOrPassword = password,
+            encryption = cipher,
+            transport = TransportType.TCP,
+            disguisePresetId = "youtube",
+            sni = "www.youtube.com",
+            hostHeader = "www.youtube.com",
+            tlsEnabled = false
+        )
     }
 
     private fun parseXrayJson(rawJson: String): ParseImportResult {
@@ -287,6 +375,8 @@ object V2RayConfigParser {
                 ?: return ParseImportResult.Error("JSON missing 'outbounds' array.")
 
             val profiles = mutableListOf<V2RayProfile>()
+            val errors = mutableListOf<String>()
+
             for (i in 0 until outbounds.length()) {
                 val ob = outbounds.optJSONObject(i) ?: continue
                 val protoRaw = ob.optString("protocol").lowercase()
@@ -313,11 +403,29 @@ object V2RayConfigParser {
 
                 when (protoRaw) {
                     "vless", "vmess" -> {
-                        val vnext = settings?.optJSONArray("vnext")?.optJSONObject(0) ?: continue
-                        val address = vnext.optString("address")
-                        val port = vnext.optInt("port", 443)
+                        val vnext = settings?.optJSONArray("vnext")?.optJSONObject(0)
+                        if (vnext == null) {
+                            errors.add("Outbound #${i + 1} ($protoRaw): missing settings.vnext[0]")
+                            continue
+                        }
+                        val address = vnext.optString("address").trim()
+                        val port = vnext.optInt("port", -1)
                         val user = vnext.optJSONArray("users")?.optJSONObject(0)
-                        val uuid = user?.optString("id").orEmpty().ifBlank { UUID.randomUUID().toString() }
+                        val uuid = user?.optString("id").orEmpty().trim()
+
+                        if (address.isEmpty()) {
+                            errors.add("Outbound #${i + 1} ($protoRaw): missing vnext address")
+                            continue
+                        }
+                        if (port !in 1..65535) {
+                            errors.add("Outbound #${i + 1} ($protoRaw): invalid port ($port)")
+                            continue
+                        }
+                        if (uuid.isEmpty()) {
+                            errors.add("Outbound #${i + 1} ($protoRaw): missing user id/UUID")
+                            continue
+                        }
+
                         val encRaw = user?.optString("security", "auto").orEmpty()
                         val cipher = EncryptionCipher.entries.find { it.wireValue.equals(encRaw, true) }
                             ?: if (protoRaw == "vless") EncryptionCipher.NONE else EncryptionCipher.AES_256_GCM
@@ -344,10 +452,28 @@ object V2RayConfigParser {
                         )
                     }
                     "trojan", "shadowsocks" -> {
-                        val server = settings?.optJSONArray("servers")?.optJSONObject(0) ?: continue
-                        val address = server.optString("address")
-                        val port = server.optInt("port", 443)
-                        val password = server.optString("password")
+                        val server = settings?.optJSONArray("servers")?.optJSONObject(0)
+                        if (server == null) {
+                            errors.add("Outbound #${i + 1} ($protoRaw): missing settings.servers[0]")
+                            continue
+                        }
+                        val address = server.optString("address").trim()
+                        val port = server.optInt("port", -1)
+                        val password = server.optString("password").trim()
+
+                        if (address.isEmpty()) {
+                            errors.add("Outbound #${i + 1} ($protoRaw): missing server address")
+                            continue
+                        }
+                        if (port !in 1..65535) {
+                            errors.add("Outbound #${i + 1} ($protoRaw): invalid port ($port)")
+                            continue
+                        }
+                        if (password.isEmpty()) {
+                            errors.add("Outbound #${i + 1} ($protoRaw): missing password")
+                            continue
+                        }
+
                         val effectiveDomain = sni.ifBlank { hostHeader }.ifBlank { address }
                         val presetId = matchPresetId(effectiveDomain)
                         profiles.add(
@@ -369,11 +495,14 @@ object V2RayConfigParser {
                             )
                         )
                     }
+                    else -> errors.add("Outbound #${i + 1}: unsupported protocol '$protoRaw'")
                 }
             }
 
             if (profiles.isEmpty()) {
-                ParseImportResult.Error("No valid proxy outbounds found in V2Ray JSON.")
+                ParseImportResult.Error(
+                    errors.firstOrNull() ?: "No valid proxy outbounds found in V2Ray JSON."
+                )
             } else {
                 ParseImportResult.Success(profiles)
             }

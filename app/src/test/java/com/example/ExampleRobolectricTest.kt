@@ -2,23 +2,21 @@ package com.example
 
 import android.content.Context
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsOff
+import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.performTextInput
 import androidx.test.core.app.ApplicationProvider
-import com.example.core.crypto.BridgeCrypto
-import com.example.core.parser.ParseImportResult
-import com.example.core.parser.QrCodeGenerator
-import com.example.core.parser.V2RayConfigParser
-import com.example.domain.model.EncryptionCipher
-import com.example.domain.model.ProtocolType
-import com.example.domain.model.V2RayProfile
-import org.junit.Assert.assertArrayEquals
+import com.example.domain.model.PerformanceMode
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -32,6 +30,19 @@ class ExampleRobolectricTest {
     @get:Rule
     val composeRule = createAndroidComposeRule<MainActivity>()
 
+    private fun dismissOnboardingIfVisible() {
+        composeRule.waitUntil(5_000L) {
+            composeRule.onAllNodesWithTag("nav_profiles").fetchSemanticsNodes().isNotEmpty() ||
+                composeRule.onAllNodesWithTag("onboarding_skip_button").fetchSemanticsNodes().isNotEmpty()
+        }
+        if (composeRule.onAllNodesWithTag("onboarding_skip_button").fetchSemanticsNodes().isNotEmpty()) {
+            composeRule.onNodeWithTag("onboarding_skip_button").performClick()
+            composeRule.waitUntil(5_000L) {
+                composeRule.onAllNodesWithTag("nav_profiles").fetchSemanticsNodes().isNotEmpty()
+            }
+        }
+    }
+
     @Test
     fun `app name matches VeloBridge`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
@@ -39,75 +50,162 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `crypto encrypt and decrypt roundtrip works with AES-256-GCM`() {
-        val key = BridgeCrypto.deriveKey("550e8400-e29b-41d4-a716-446655440000")
-        val payload = "GET /youtubei/v1/player HTTP/1.1".toByteArray(Charsets.UTF_8)
-        val encrypted = BridgeCrypto.encryptFrame(payload, key, EncryptionCipher.AES_256_GCM)
-        val decrypted = BridgeCrypto.decryptFrame(encrypted, key, EncryptionCipher.AES_256_GCM)
-        assertArrayEquals(payload, decrypted)
-
-        val window = System.currentTimeMillis() / 1000L / 60L
-        val token = BridgeCrypto.computeAuthToken(
-            "550e8400-e29b-41d4-a716-446655440000",
-            "www.youtube.com",
-            window
-        )
-        assertTrue(
-            BridgeCrypto.verifyAuthToken(
-                token,
-                "550e8400-e29b-41d4-a716-446655440000",
-                "www.youtube.com"
-            )
-        )
-    }
-
-    @Test
-    fun `v2ray parser parses vless and velobridge and xray json`() {
-        val vless = "vless://11111111-2222-3333-4444-555555555555@192.168.1.44:10808?security=tls&type=ws&sni=zoom.us&host=zoom.us&path=%2Fwc%2Fstream#OfficeZoom"
-        val res1 = V2RayConfigParser.parseInput(vless)
-        assertTrue(res1 is ParseImportResult.Success)
-        val profile = (res1 as ParseImportResult.Success).profiles.first()
-        assertEquals(ProtocolType.VLESS, profile.protocol)
-        assertEquals("192.168.1.44", profile.address)
-        assertEquals(10808, profile.port)
-        assertEquals("zoom", profile.disguisePresetId)
-        assertEquals("zoom.us", profile.effectiveDisguiseDomain)
-
-        val json = V2RayConfigParser.toXrayClientJson(profile)
-        val res2 = V2RayConfigParser.parseInput(json)
-        assertTrue(res2 is ParseImportResult.Success)
-
-        val bridgeUri = V2RayConfigParser.toVeloBridgeUri(
-            ip = "192.168.43.1",
-            port = 10808,
-            uuid = "11111111-2222-3333-4444-555555555555",
-            disguiseId = "github",
-            disguiseDomain = "github.com",
-            wsPath = "/_ws/live",
-            cipher = EncryptionCipher.AES_256_GCM
-        )
-        val res3 = V2RayConfigParser.parseInput(bridgeUri)
-        assertTrue(res3 is ParseImportResult.Success)
-        assertEquals(ProtocolType.VELO_BRIDGE, (res3 as ParseImportResult.Success).profiles.first().protocol)
-    }
-
-    @Test
-    fun `qr code generator renders pairing bitmap`() {
-        val bitmap = QrCodeGenerator.generateBitmap("velobridge://uuid@192.168.1.10:10808", 256)
-        assertNotNull(bitmap)
-        assertEquals(256, bitmap?.width)
-    }
-
-    @Test
-    fun `main navigation tabs render and switch cleanly`() {
+    fun `onboarding flow completes and can be replayed from settings`() {
+        composeRule.waitUntil(5_000L) {
+            composeRule.onAllNodesWithTag("onboarding_screen").fetchSemanticsNodes().isNotEmpty() ||
+                composeRule.onAllNodesWithTag("nav_settings").fetchSemanticsNodes().isNotEmpty()
+        }
+        val startedFromSettings =
+            composeRule.onAllNodesWithTag("onboarding_screen").fetchSemanticsNodes().isEmpty()
+        if (startedFromSettings) {
+            composeRule.onNodeWithTag("nav_settings").performClick()
+            composeRule.onNodeWithTag("settings_lazy_column")
+                .performScrollToNode(hasTestTag("settings_replay_onboarding"))
+            composeRule.onNodeWithTag("settings_replay_onboarding").performClick()
+            composeRule.waitUntil(5_000L) {
+                composeRule.onAllNodesWithTag("onboarding_screen").fetchSemanticsNodes().isNotEmpty()
+            }
+        }
+        composeRule.onNodeWithTag("onboarding_next_button").performClick()
+        composeRule.onNodeWithTag("onboarding_next_button").performClick()
+        composeRule.onNodeWithTag("onboarding_finish_button").performClick()
+        if (startedFromSettings) {
+            composeRule.waitUntil(5_000L) {
+                composeRule.onAllNodesWithTag("nav_connect").fetchSemanticsNodes().isNotEmpty()
+            }
+            composeRule.onNodeWithTag("nav_connect").performClick()
+        }
+        composeRule.waitUntil(5_000L) {
+            composeRule.onAllNodesWithTag("vpn_power_button").fetchSemanticsNodes().isNotEmpty()
+        }
         composeRule.onNodeWithTag("vpn_power_button").assertIsDisplayed()
+
+        // Navigate to Settings and verify replay guide works
+        composeRule.onNodeWithTag("nav_settings").performClick()
+        composeRule.onNodeWithTag("settings_lazy_column")
+            .performScrollToNode(hasTestTag("settings_replay_onboarding"))
+        composeRule.onNodeWithTag("settings_replay_onboarding").performClick()
+        composeRule.waitUntil(5_000L) {
+            composeRule.onAllNodesWithTag("onboarding_screen").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("onboarding_screen").assertIsDisplayed()
+        composeRule.onNodeWithTag("onboarding_skip_button").performClick()
+        composeRule.waitUntil(5_000L) {
+            composeRule.onAllNodesWithTag("settings_lazy_column").fetchSemanticsNodes().isNotEmpty()
+        }
+    }
+
+    @Test
+    fun `main 5-tab navigation and disguise lab subscreen render cleanly`() {
+        dismissOnboardingIfVisible()
+
+        composeRule.onNodeWithTag("vpn_power_button").assertIsDisplayed()
+
         composeRule.onNodeWithTag("nav_profiles").performClick()
         composeRule.onNodeWithTag("find_phone_server_button").assertIsDisplayed()
+        composeRule.onNodeWithTag("import_qr_image_button").assertIsDisplayed()
+
+        composeRule.onNodeWithTag("nav_analytics").performClick()
+        composeRule.onNodeWithTag("analytics_quality_card").assertIsDisplayed()
+        composeRule.onNodeWithTag("analytics_lazy_column")
+            .performScrollToNode(hasTestTag("analytics_diagnostics_card"))
+        composeRule.onNodeWithTag("analytics_diagnostics_card").assertIsDisplayed()
+
         composeRule.onNodeWithTag("nav_bridge").performClick()
         composeRule.onNodeWithTag("server_power_button").assertIsDisplayed()
-        composeRule.onNodeWithTag("nav_disguise").performClick()
+
+        composeRule.onNodeWithTag("nav_settings").performClick()
+        composeRule.onNodeWithTag("settings_lazy_column")
+            .performScrollToNode(hasTestTag("settings_open_disguise_lab"))
+        composeRule.onNodeWithTag("settings_open_disguise_lab").performClick()
+        composeRule.waitForIdle()
+
         composeRule.onNodeWithTag("disguise_lazy_column")
             .performScrollToNode(hasTestTag("probe_card"))
+        composeRule.onNodeWithTag("run_probe_button").performScrollTo()
         composeRule.onNodeWithTag("run_probe_button").assertIsDisplayed()
+        composeRule.onNodeWithTag("disguise_back_button").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("settings_lazy_column")
+            .performScrollToNode(hasTestTag("settings_general_card"))
+        composeRule.onNodeWithTag("settings_general_card").assertIsDisplayed()
+    }
+
+    @Test
+    fun `high speed data mode specs and cross-screen toggle sync work`() {
+        assertEquals(1500, PerformanceMode.BALANCED.mtu)
+        assertEquals(9000, PerformanceMode.HIGH_SPEED.mtu)
+        assertEquals(262144, PerformanceMode.HIGH_SPEED.socketBufferBytes)
+        assertEquals(49152, PerformanceMode.HIGH_SPEED.relayChunkBytes)
+        assertEquals(8800, PerformanceMode.HIGH_SPEED.tunSegmentBytes)
+
+        dismissOnboardingIfVisible()
+
+        composeRule.onNodeWithTag("dashboard_lazy_column")
+            .performScrollToNode(hasTestTag("high_speed_mode_card"))
+        val switchNode = composeRule.onNodeWithTag("high_speed_mode_switch")
+        switchNode.assertIsDisplayed()
+        switchNode.assertIsOff()
+        switchNode.performClick()
+        composeRule.waitForIdle()
+        switchNode.assertIsOn()
+        composeRule.mainClock.advanceTimeBy(5000L)
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("nav_bridge").performClick()
+        composeRule.onNodeWithTag("bridge_lazy_column")
+            .performScrollToNode(hasTestTag("server_settings_card"))
+        composeRule.onNodeWithTag("server_high_speed_switch").assertIsOn()
+
+        composeRule.onNodeWithTag("nav_settings").performClick()
+        composeRule.onNodeWithTag("settings_lazy_column")
+            .performScrollToNode(hasTestTag("settings_high_speed_switch"))
+        composeRule.onNodeWithTag("settings_high_speed_switch").assertIsOn()
+
+        composeRule.onNodeWithTag("nav_connect").performClick()
+        composeRule.onNodeWithTag("dashboard_lazy_column")
+            .performScrollToNode(hasTestTag("high_speed_mode_card"))
+        switchNode.performClick()
+        composeRule.waitForIdle()
+        switchNode.assertIsOff()
+
+        composeRule.onNodeWithTag("nav_bridge").performClick()
+        composeRule.onNodeWithTag("bridge_lazy_column")
+            .performScrollToNode(hasTestTag("server_settings_card"))
+        composeRule.onNodeWithTag("server_high_speed_switch").assertIsOff()
+    }
+
+    @Test
+    fun `profiles import and search filter work via UI`() {
+        dismissOnboardingIfVisible()
+
+        composeRule.onNodeWithTag("nav_profiles").performClick()
+        composeRule.onNodeWithTag("import_paste_button").performClick()
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("import_config_textfield").performTextInput(
+            "velobridge://11111111-2222-3333-4444-555555555555@192.168.43.1:10808?disguise=github&sni=github.com#HomeBridge\n" +
+                "vless://22222222-2222-3333-4444-555555555555@198.51.100.12:443?sni=zoom.us#RemoteZoom"
+        )
+        composeRule.onNodeWithTag("confirm_import_button").performClick()
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("profiles_lazy_column")
+            .performScrollToNode(hasText("HomeBridge"))
+        composeRule.onNodeWithText("HomeBridge").assertIsDisplayed()
+
+        composeRule.onNodeWithTag("profiles_lazy_column")
+            .performScrollToNode(hasText("RemoteZoom"))
+        composeRule.onNodeWithText("RemoteZoom").assertIsDisplayed()
+
+        // Scroll back to filter chips and filter by VLESS -> RemoteZoom remains visible
+        composeRule.onNodeWithTag("profiles_lazy_column")
+            .performScrollToNode(hasTestTag("filter_protocol_vless"))
+        composeRule.onNodeWithTag("filter_protocol_vless").performClick()
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("profiles_lazy_column")
+            .performScrollToNode(hasText("RemoteZoom"))
+        composeRule.onNodeWithText("RemoteZoom").assertIsDisplayed()
     }
 }

@@ -1,6 +1,7 @@
 package com.example.ui.theme
 
 import android.os.Build
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
@@ -9,17 +10,22 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.example.domain.model.AppearanceMode
 
 private val VeloDarkColorScheme = darkColorScheme(
     primary = SignalCyan,
-    onPrimary = Color(0xFF002028),
+    onPrimary = Color(0xFF042030),
     primaryContainer = SignalCyanContainer,
-    onPrimaryContainer = Color(0xFFB3F7FF),
+    onPrimaryContainer = Color(0xFFBAE6FD),
     secondary = ShieldEmerald,
-    onSecondary = Color(0xFF002116),
+    onSecondary = Color(0xFF022117),
     secondaryContainer = ShieldEmeraldContainer,
     onSecondaryContainer = Color(0xFFA7F3D0),
     tertiary = AlertAmber,
@@ -36,26 +42,27 @@ private val VeloDarkColorScheme = darkColorScheme(
     onSurface = TextPrimaryDark,
     surfaceVariant = SlateElevated,
     onSurfaceVariant = TextSecondaryDark,
+    surfaceContainerHigh = SlateElevatedHigh,
     outline = SlateBorder,
-    outlineVariant = Color(0xFF1D2B40)
+    outlineVariant = Color(0xFF1A263A)
 )
 
 private val VeloLightColorScheme = lightColorScheme(
     primary = SignalCyanLightPrimary,
     onPrimary = Color.White,
-    primaryContainer = Color(0xFFD6F4FF),
-    onPrimaryContainer = Color(0xFF003546),
-    secondary = Color(0xFF059669),
+    primaryContainer = SignalCyanLightContainer,
+    onPrimaryContainer = Color(0xFF0C4A6E),
+    secondary = ShieldEmeraldLight,
     onSecondary = Color.White,
-    secondaryContainer = Color(0xFFD1FAE5),
+    secondaryContainer = ShieldEmeraldLightContainer,
     onSecondaryContainer = Color(0xFF064E3B),
-    tertiary = Color(0xFFD97706),
+    tertiary = AlertAmberLight,
     onTertiary = Color.White,
-    tertiaryContainer = Color(0xFFFEF3C7),
+    tertiaryContainer = AlertAmberLightContainer,
     onTertiaryContainer = Color(0xFF78350F),
-    error = Color(0xFFDC2626),
+    error = DangerCoralLight,
     onError = Color.White,
-    errorContainer = Color(0xFFFEE2E2),
+    errorContainer = DangerCoralLightContainer,
     onErrorContainer = Color(0xFF7F1D1D),
     background = LightBg,
     onBackground = TextPrimaryLight,
@@ -63,36 +70,99 @@ private val VeloLightColorScheme = lightColorScheme(
     onSurface = TextPrimaryLight,
     surfaceVariant = LightElevated,
     onSurfaceVariant = TextSecondaryLight,
+    surfaceContainerHigh = LightElevatedHigh,
     outline = LightBorder,
     outlineVariant = Color(0xFFE2E8F0)
 )
 
 val VeloShapes = Shapes(
+    extraSmall = RoundedCornerShape(6.dp),
     small = RoundedCornerShape(10.dp),
     medium = RoundedCornerShape(16.dp),
-    large = RoundedCornerShape(24.dp),
-    extraLarge = RoundedCornerShape(32.dp)
+    large = RoundedCornerShape(22.dp),
+    extraLarge = RoundedCornerShape(28.dp)
 )
+
+@Immutable
+data class VeloSemanticColors(
+    val success: Color,
+    val successContainer: Color,
+    val warning: Color,
+    val warningContainer: Color,
+    val info: Color,
+    val infoContainer: Color,
+    val danger: Color,
+    val dangerContainer: Color,
+    val mutedText: Color,
+    val isDark: Boolean
+)
+
+private val DarkSemanticColors = VeloSemanticColors(
+    success = ShieldEmerald,
+    successContainer = ShieldEmeraldContainer,
+    warning = AlertAmber,
+    warningContainer = AlertAmberContainer,
+    info = SignalCyan,
+    infoContainer = SignalCyanContainer,
+    danger = DangerCoral,
+    dangerContainer = DangerCoralContainer,
+    mutedText = TextMutedDark,
+    isDark = true
+)
+
+private val LightSemanticColors = VeloSemanticColors(
+    success = ShieldEmeraldLight,
+    successContainer = ShieldEmeraldLightContainer,
+    warning = AlertAmberLight,
+    warningContainer = AlertAmberLightContainer,
+    info = SignalCyanLightPrimary,
+    infoContainer = SignalCyanLightContainer,
+    danger = DangerCoralLight,
+    dangerContainer = DangerCoralLightContainer,
+    mutedText = TextSecondaryLight,
+    isDark = false
+)
+
+val LocalVeloColors = staticCompositionLocalOf { DarkSemanticColors }
+
+object VeloSpacing {
+    val xs: Dp = 4.dp
+    val sm: Dp = 8.dp
+    val md: Dp = 12.dp
+    val lg: Dp = 16.dp
+    val xl: Dp = 24.dp
+    val maxContentWidth: Dp = 720.dp
+}
 
 @Composable
 fun VeloBridgeTheme(
-    darkTheme: Boolean = true,
+    appearanceMode: AppearanceMode = AppearanceMode.DARK,
     dynamicColor: Boolean = false,
     content: @Composable () -> Unit
 ) {
+    val useDark = when (appearanceMode) {
+        AppearanceMode.DARK -> true
+        AppearanceMode.LIGHT -> false
+        AppearanceMode.SYSTEM -> isSystemInDarkTheme()
+    }
+
     val colorScheme = when {
         dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
             val context = LocalContext.current
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+            if (useDark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
         }
-        darkTheme -> VeloDarkColorScheme
+        useDark -> VeloDarkColorScheme
         else -> VeloLightColorScheme
     }
 
-    MaterialTheme(
-        colorScheme = colorScheme,
-        typography = VeloTypography,
-        shapes = VeloShapes,
-        content = content
-    )
+    val semantic = if (useDark) DarkSemanticColors else LightSemanticColors
+
+    CompositionLocalProvider(LocalVeloColors provides semantic) {
+        MaterialTheme(
+            colorScheme = colorScheme,
+            typography = VeloTypography,
+            shapes = VeloShapes,
+            content = content
+        )
+    }
 }

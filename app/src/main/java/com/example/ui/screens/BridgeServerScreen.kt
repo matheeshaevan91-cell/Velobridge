@@ -21,17 +21,19 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Router
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -63,20 +65,23 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.R
+import com.example.core.crypto.BridgeCrypto
 import com.example.core.parser.QrCodeGenerator
 import com.example.core.parser.V2RayConfigParser
 import com.example.domain.model.DisguiseCatalog
 import com.example.domain.model.EncryptionCipher
 import com.example.domain.model.LogEntry
 import com.example.domain.model.ServerRuntimeState
+import com.example.ui.components.ConfirmActionDialog
+import com.example.ui.components.VeloCard
+import com.example.ui.components.VeloStatusBadge
 import com.example.ui.components.copyToClipboard
 import com.example.ui.components.disguiseIcon
 import com.example.ui.components.formatBytes
 import com.example.ui.components.formatDuration
 import com.example.ui.components.formatLogTime
+import com.example.ui.theme.LocalVeloColors
 import com.example.ui.theme.MonoDataStyle
-import com.example.ui.theme.ShieldEmerald
-import com.example.ui.theme.SignalCyan
 import kotlinx.coroutines.delay
 
 @Composable
@@ -94,16 +99,21 @@ fun BridgeServerScreen(
     ) -> Unit,
     onRegenerateUuid: () -> Unit,
     onRefreshIps: () -> Unit,
+    onToggleHighSpeedMode: (Boolean) -> Unit,
     onNotify: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val velo = LocalVeloColors.current
+
     var portText by remember(serverState.listenPort) { mutableStateOf(serverState.listenPort.toString()) }
     var selectedDisguiseId by remember(serverState.disguisePresetId) { mutableStateOf(serverState.disguisePresetId) }
     var customDomain by remember(serverState.customDisguiseDomain) { mutableStateOf(serverState.customDisguiseDomain) }
     var selectedCipher by remember(serverState.encryption) { mutableStateOf(serverState.encryption) }
     var lanDiscovery by remember(serverState.lanDiscoveryEnabled) { mutableStateOf(serverState.lanDiscoveryEnabled) }
     var selectedIp by remember(serverState.localIps) { mutableStateOf(serverState.primaryIp) }
+    var revealUuid by remember { mutableStateOf(false) }
+    var showRotateUuidDialog by remember { mutableStateOf(false) }
     var serverUptime by remember { mutableStateOf("00:00:00") }
 
     LaunchedEffect(serverState.isRunning, serverState.startedAtMillis) {
@@ -127,7 +137,7 @@ fun BridgeServerScreen(
             disguiseDomain = effectiveDomain,
             wsPath = effectiveWsPath,
             cipher = selectedCipher,
-            name = "Old Phone Bridge ($selectedIp)"
+            name = "Phone Bridge ($selectedIp)"
         )
     }
     val qrBitmap = remember(pairingUri) { QrCodeGenerator.generateBitmap(pairingUri, 512) }
@@ -139,21 +149,18 @@ fun BridgeServerScreen(
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .widthIn(max = 680.dp),
+                .widthIn(max = 720.dp)
+                .testTag("bridge_lazy_column"),
             contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             // Illustrated Hero Banner
             item {
-                Card(
-                    shape = MaterialTheme.shapes.large,
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
+                VeloCard {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(172.dp)
+                            .height(156.dp)
                     ) {
                         Image(
                             painter = painterResource(id = R.drawable.img_bridge_hero_1795239921412),
@@ -167,8 +174,8 @@ fun BridgeServerScreen(
                                 .background(
                                     Brush.verticalGradient(
                                         colors = listOf(
-                                            Color(0x220A111C),
-                                            Color(0xE60A111C)
+                                            MaterialTheme.colorScheme.background.copy(alpha = 0.25f),
+                                            MaterialTheme.colorScheme.background.copy(alpha = 0.92f)
                                         )
                                     )
                                 )
@@ -179,30 +186,24 @@ fun BridgeServerScreen(
                                 .padding(16.dp)
                         ) {
                             Text(
-                                text = "Phone-to-Phone V2Ray Bridge",
+                                text = "Phone Bridge Server",
                                 style = MaterialTheme.typography.titleLarge,
-                                color = Color.White
+                                color = MaterialTheme.colorScheme.onBackground
                             )
                             Text(
-                                text = "Turn an old Android phone into an encrypted V2Ray bridge server, then pair your daily phone.",
+                                text = "Host an authenticated AEAD relay on this device and pair your client phone over Wi-Fi or Hotspot.",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = Color(0xFFCBD5E1)
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     }
                 }
             }
 
-            // Server Power & Telemetry Card
+            // Readiness, Auth Audit & Active Forwarding Status Card
             item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    border = BorderStroke(
-                        1.dp,
-                        if (serverState.isRunning) ShieldEmerald.copy(alpha = 0.6f) else MaterialTheme.colorScheme.outline
-                    ),
-                    shape = MaterialTheme.shapes.medium,
-                    modifier = Modifier.fillMaxWidth()
+                VeloCard(
+                    borderColor = if (serverState.isRunning) velo.success.copy(alpha = 0.6f) else MaterialTheme.colorScheme.outline
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Row(
@@ -210,28 +211,43 @@ fun BridgeServerScreen(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f)
+                            ) {
                                 Icon(
                                     Icons.Filled.Router,
                                     contentDescription = null,
-                                    tint = if (serverState.isRunning) ShieldEmerald else SignalCyan
+                                    tint = if (serverState.isRunning) velo.success else MaterialTheme.colorScheme.primary
                                 )
                                 Spacer(modifier = Modifier.width(10.dp))
                                 Column {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Text(
+                                            text = if (serverState.isRunning) {
+                                                stringResource(R.string.server_running)
+                                            } else {
+                                                stringResource(R.string.server_stopped)
+                                            },
+                                            style = MaterialTheme.typography.titleMedium,
+                                            color = if (serverState.isRunning) velo.success else MaterialTheme.colorScheme.onSurface
+                                        )
+                                        if (serverState.highSpeedMode) {
+                                            VeloStatusBadge(
+                                                label = "TURBO",
+                                                accentColor = velo.info,
+                                                containerColor = velo.infoContainer
+                                            )
+                                        }
+                                    }
                                     Text(
                                         text = if (serverState.isRunning) {
-                                            stringResource(R.string.server_running)
+                                            "Listening $selectedIp:${serverState.listenPort} • $serverUptime • ${serverState.activeNetworkType}"
                                         } else {
-                                            stringResource(R.string.server_stopped)
-                                        },
-                                        style = MaterialTheme.typography.titleMedium,
-                                        color = if (serverState.isRunning) ShieldEmerald else MaterialTheme.colorScheme.onSurface
-                                    )
-                                    Text(
-                                        text = if (serverState.isRunning) {
-                                            "Listening $selectedIp:${serverState.listenPort} • $serverUptime"
-                                        } else {
-                                            "Ready on $selectedIp:${serverState.listenPort}"
+                                            "Standby on $selectedIp:${serverState.listenPort} • ${serverState.activeNetworkType}"
                                         },
                                         style = MonoDataStyle.copy(fontSize = MaterialTheme.typography.labelSmall.fontSize),
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -260,7 +276,7 @@ fun BridgeServerScreen(
                                 onToggleServer()
                             },
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = if (serverState.isRunning) MaterialTheme.colorScheme.error else ShieldEmerald,
+                                containerColor = if (serverState.isRunning) velo.danger else velo.success,
                                 contentColor = Color.White
                             ),
                             modifier = Modifier
@@ -282,9 +298,55 @@ fun BridgeServerScreen(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                ServerMetricChip("Peers", "${serverState.activePeers.size}", Modifier.weight(1f))
+                                ServerMetricChip("Active Peers", "${serverState.activePeers.size}", Modifier.weight(1f))
+                                ServerMetricChip("Auth OK", "${serverState.authenticatedHandshakes}", Modifier.weight(1f))
+                                ServerMetricChip("Blocked", "${serverState.rejectedHandshakes}", Modifier.weight(1f))
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
                                 ServerMetricChip("Relayed Up", formatBytes(serverState.totalBytesUp), Modifier.weight(1f))
                                 ServerMetricChip("Relayed Down", formatBytes(serverState.totalBytesDown), Modifier.weight(1f))
+                            }
+
+                            if (serverState.activePeers.isNotEmpty()) {
+                                Spacer(modifier = Modifier.height(10.dp))
+                                Text(
+                                    text = "Connected Peers",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                                serverState.activePeers.take(4).forEach { peer ->
+                                    Surface(
+                                        shape = MaterialTheme.shapes.small,
+                                        color = MaterialTheme.colorScheme.surfaceVariant,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 2.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = "${peer.remoteIp} (${peer.disguiseDomain})",
+                                                style = MonoDataStyle.copy(fontSize = MaterialTheme.typography.labelSmall.fontSize),
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            Text(
+                                                text = "↑${formatBytes(peer.bytesUp)} ↓${formatBytes(peer.bytesDown)}",
+                                                style = MonoDataStyle.copy(fontSize = MaterialTheme.typography.labelSmall.fontSize),
+                                                color = velo.success
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -293,24 +355,22 @@ fun BridgeServerScreen(
 
             // Server Configuration Card
             item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                    shape = MaterialTheme.shapes.medium,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
+                VeloCard(modifier = Modifier.testTag("server_settings_card")) {
                     Column(
                         modifier = Modifier.padding(16.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        Text(
-                            text = "Bridge Server Settings",
-                            style = MaterialTheme.typography.titleSmall
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(Icons.Filled.Shield, contentDescription = null, tint = velo.success, modifier = Modifier.size(18.dp))
+                            Text("Server Configuration & Security", style = MaterialTheme.typography.titleSmall)
+                        }
 
                         if (serverState.localIps.isNotEmpty()) {
                             Text(
-                                text = "Local Network Interface IP (share with Client Phone)",
+                                text = "Local Network Interface IP",
                                 style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -348,25 +408,33 @@ fun BridgeServerScreen(
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                 singleLine = true,
                                 modifier = Modifier
-                                    .weight(0.4f)
+                                    .weight(0.36f)
                                     .testTag("server_port_input")
                             )
 
                             OutlinedTextField(
-                                value = serverState.uuid.take(18) + "…",
+                                value = if (revealUuid) serverState.uuid else BridgeCrypto.maskSecret(serverState.uuid),
                                 onValueChange = {},
                                 readOnly = true,
-                                label = { Text("Auth UUID") },
+                                label = { Text("Bridge Secret UUID") },
                                 trailingIcon = {
-                                    IconButton(
-                                        onClick = onRegenerateUuid,
-                                        enabled = !serverState.isRunning
-                                    ) {
-                                        Icon(Icons.Filled.Refresh, contentDescription = "Regenerate UUID")
+                                    Row {
+                                        IconButton(onClick = { revealUuid = !revealUuid }) {
+                                            Icon(
+                                                imageVector = if (revealUuid) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                                contentDescription = if (revealUuid) "Hide secret" else "Reveal secret"
+                                            )
+                                        }
+                                        IconButton(
+                                            onClick = { showRotateUuidDialog = true },
+                                            enabled = !serverState.isRunning
+                                        ) {
+                                            Icon(Icons.Filled.Refresh, contentDescription = "Rotate Bridge Secret UUID")
+                                        }
                                     }
                                 },
                                 singleLine = true,
-                                modifier = Modifier.weight(0.6f)
+                                modifier = Modifier.weight(0.64f)
                             )
                         }
 
@@ -472,7 +540,7 @@ fun BridgeServerScreen(
                             Column(modifier = Modifier.weight(1f)) {
                                 Text("LAN Auto-Discovery Beacon", style = MaterialTheme.typography.bodyMedium)
                                 Text(
-                                    text = "Lets your Client Phone find this server automatically on the same Wi-Fi/Hotspot",
+                                    text = "Broadcasts pairing offer on local Wi-Fi/Hotspot",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -493,19 +561,46 @@ fun BridgeServerScreen(
                                 enabled = !serverState.isRunning
                             )
                         }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Bolt,
+                                    contentDescription = null,
+                                    tint = if (serverState.highSpeedMode) velo.info else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column {
+                                    Text("High-Speed Relay Mode", style = MaterialTheme.typography.bodyMedium)
+                                    Text(
+                                        text = "256 KB TCP buffers, 48 KB encrypted frames & low-delay QoS",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            Switch(
+                                checked = serverState.highSpeedMode,
+                                onCheckedChange = onToggleHighSpeedMode,
+                                modifier = Modifier.testTag("server_high_speed_switch")
+                            )
+                        }
                     }
                 }
             }
 
-            // Instant Client Pairing QR & Config Export
+            // Instant Client Pairing QR & Export
             if (pairingUri.isNotBlank()) {
                 item {
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                        shape = MaterialTheme.shapes.medium,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
+                    VeloCard {
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             modifier = Modifier.padding(16.dp)
@@ -514,18 +609,18 @@ fun BridgeServerScreen(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                Icon(Icons.Filled.Devices, contentDescription = null, tint = SignalCyan)
+                                Icon(Icons.Filled.Devices, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text("Pair Client Phone", style = MaterialTheme.typography.titleSmall)
                             }
                             Spacer(modifier = Modifier.height(6.dp))
                             Text(
-                                text = "On your Client Phone, open Profiles -> Pair LAN, or copy/scan this link:",
+                                text = "Use Profiles -> Pair LAN, import a screenshot via QR Image, or copy this link:",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.fillMaxWidth()
                             )
-                            Spacer(modifier = Modifier.height(14.dp))
+                            Spacer(modifier = Modifier.height(12.dp))
                             if (qrBitmap != null) {
                                 Surface(
                                     color = Color.White,
@@ -575,21 +670,16 @@ fun BridgeServerScreen(
                 }
             }
 
-            // Live Server Logs
+            // Recent Bridge Activity
             item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                    shape = MaterialTheme.shapes.medium,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
+                VeloCard {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text("Recent Bridge Activity", style = MaterialTheme.typography.titleSmall)
                         Spacer(modifier = Modifier.height(8.dp))
                         val recent = logs.take(10)
                         if (recent.isEmpty()) {
                             Text(
-                                text = "Start the Bridge Server to monitor incoming handshakes and traffic relays.",
+                                text = "Start the Bridge Server to monitor authenticated handshakes and traffic relays.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -609,6 +699,17 @@ fun BridgeServerScreen(
                 }
             }
         }
+    }
+
+    if (showRotateUuidDialog) {
+        ConfirmActionDialog(
+            title = "Rotate Bridge Secret UUID?",
+            message = "Existing paired client phones will need the new pairing link or QR code to reconnect.",
+            confirmLabel = "Rotate Secret",
+            isDestructive = false,
+            onConfirm = onRegenerateUuid,
+            onDismiss = { showRotateUuidDialog = false }
+        )
     }
 }
 

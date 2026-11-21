@@ -1,12 +1,14 @@
 package com.example.ui.screens
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -29,11 +31,13 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -55,8 +59,9 @@ import com.example.domain.model.ProtocolType
 import com.example.domain.model.TlsFingerprint
 import com.example.domain.model.TransportType
 import com.example.domain.model.V2RayProfile
+import com.example.ui.components.ProtocolSupportBadge
 import com.example.ui.components.disguiseIcon
-import com.example.ui.theme.DangerCoral
+import com.example.ui.theme.LocalVeloColors
 import com.example.ui.theme.MonoDataStyle
 import java.util.UUID
 
@@ -69,6 +74,7 @@ fun ProfileEditorScreen(
 ) {
     BackHandler { onBack() }
 
+    val velo = LocalVeloColors.current
     var editorTab by remember { mutableIntStateOf(0) }
 
     var name by remember(existingProfile) {
@@ -140,7 +146,9 @@ fun ProfileEditorScreen(
             tlsEnabled = tlsEnabled,
             allowInsecure = allowInsecure,
             tlsFingerprint = tlsFingerprint,
-            isPhoneBridge = protocol == ProtocolType.VELO_BRIDGE
+            isPhoneBridge = protocol == ProtocolType.VELO_BRIDGE,
+            isFavorite = existingProfile?.isFavorite ?: false,
+            lastConnectedAt = existingProfile?.lastConnectedAt
         )
     }
 
@@ -149,9 +157,18 @@ fun ProfileEditorScreen(
     }
 
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
-                title = { Text(if (existingProfile == null) "New Configuration" else "Edit Configuration") },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.background
+                ),
+                title = {
+                    Text(
+                        text = if (existingProfile == null) "New Configuration" else "Edit Configuration",
+                        style = MaterialTheme.typography.titleLarge
+                    )
+                },
                 navigationIcon = {
                     IconButton(onClick = onBack, modifier = Modifier.testTag("editor_back_button")) {
                         Icon(
@@ -205,9 +222,12 @@ fun ProfileEditorScreen(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .widthIn(max = 680.dp)
+                    .widthIn(max = 720.dp)
             ) {
-                TabRow(selectedTabIndex = editorTab) {
+                TabRow(
+                    selectedTabIndex = editorTab,
+                    containerColor = MaterialTheme.colorScheme.background
+                ) {
                     Tab(
                         selected = editorTab == 0,
                         onClick = {
@@ -231,8 +251,8 @@ fun ProfileEditorScreen(
                     Text(
                         text = validationError.orEmpty(),
                         style = MaterialTheme.typography.bodySmall,
-                        color = DangerCoral,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                        color = velo.danger,
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)
                     )
                 }
 
@@ -266,6 +286,24 @@ fun ProfileEditorScreen(
                                     selected = protocol == p,
                                     onClick = { protocol = p },
                                     label = { Text(p.label) }
+                                )
+                            }
+                        }
+
+                        Surface(
+                            shape = MaterialTheme.shapes.small,
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                ProtocolSupportBadge(protocol = protocol)
+                                Text(
+                                    text = protocol.supportLevel.explanation,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
                         }
@@ -421,8 +459,27 @@ fun ProfileEditorScreen(
                             }
                         }
 
+                        Text("TLS Fingerprint", style = MaterialTheme.typography.labelMedium)
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            TlsFingerprint.entries.forEach { fp ->
+                                FilterChip(
+                                    selected = tlsFingerprint == fp,
+                                    onClick = { tlsFingerprint = fp },
+                                    label = { Text(fp.label) }
+                                )
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .defaultMinSize(minHeight = 48.dp)
+                                .clickable { tlsEnabled = !tlsEnabled },
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
@@ -431,7 +488,10 @@ fun ProfileEditorScreen(
                         }
 
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .defaultMinSize(minHeight = 48.dp)
+                                .clickable { allowInsecure = !allowInsecure },
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
@@ -439,7 +499,7 @@ fun ProfileEditorScreen(
                             Switch(checked = allowInsecure, onCheckedChange = { allowInsecure = it })
                         }
 
-                        Spacer(modifier = Modifier.height(8.dp))
+                        Spacer(modifier = Modifier.height(6.dp))
                         Button(
                             onClick = {
                                 val parsedPort = portText.toIntOrNull()

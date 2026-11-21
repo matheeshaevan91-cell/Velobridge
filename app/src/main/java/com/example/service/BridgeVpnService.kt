@@ -7,15 +7,20 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
 import com.example.MainActivity
 import com.example.R
+import com.example.VeloBridgeApp
 import com.example.core.network.NetworkDiagnostics
+import com.example.core.network.RouteCalculator
 import com.example.domain.model.EncryptionCipher
 import com.example.domain.model.LogLevel
+import com.example.domain.model.PerformanceMode
 import com.example.domain.model.ProtocolType
 import com.example.domain.model.TlsFingerprint
 import com.example.domain.model.TransportType
@@ -39,10 +44,15 @@ class BridgeVpnService : VpnService() {
     private var tunInterface: ParcelFileDescriptor? = null
     private var tunBridge: TunPacketBridge? = null
     private var telemetryJob: Job? = null
+    private var connectJob: Job? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     private val totalUpBytes = AtomicLong(0L)
     private val totalDownBytes = AtomicLong(0L)
     private val activeFlowsCount = AtomicLong(0L)
+    private val forwardedPackets = AtomicLong(0L)
+    private val droppedPackets = AtomicLong(0L)
+    private val bypassedPackets = AtomicLong(0L)
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -55,9 +65,11 @@ class BridgeVpnService : VpnService() {
                 val profile = extractProfileFromIntent(intent)
                 val dns = intent?.getStringExtra(EXTRA_DNS) ?: "1.1.1.1"
                 val bypassLan = intent?.getBooleanExtra(EXTRA_BYPASS_LAN, true) ?: true
+                val highSpeed = intent?.getBooleanExtra(EXTRA_HIGH_SPEED, false) ?: false
+                val autoReconnect = intent?.getBooleanExtra(EXTRA_AUTO_RECONNECT, true) ?: true
 
-                startForegroundNotification(profile)
-                startVpnInternal(profile, dns, bypassLan)
+                startForegroundNotification(profile, highSpeed, "Connecting…")
+                startVpnInternal(profile, dns, bypassLan, highSpeed, autoReconnect)
             }
         }
         return START_STICKY
@@ -70,7 +82,11 @@ class BridgeVpnService : VpnService() {
         super.onRevoke()
     }
 
-    private fun startForegroundNotification(profile: V2RayProfile) {
+    private fun startForegroundNotification(
+        profile: V2RayProfile,
+        highSpeed: Boolean,
+        statusLabel: String
+    ) {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
@@ -94,10 +110,11 @@ class BridgeVpnService : VpnService() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
+        val modeSuffix = if (highSpeed) " • TURBO" else ""
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_lock_lock)
-            .setContentTitle("VeloBridge Active • ${profile.name}")
-            .setContentText("Disguised as ${profile.effectiveDisguiseDomain} (${profile.encryption.label})")
+            .setContentTitle("VeloBridge $statusLabel$modeSuffix")
+            .setContentText("${profile.name} • Disguise: ${profile.effectiveDisguiseDomain}")
             .setOngoing(true)
             .setContentIntent(openIntent)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Disconnect", stopIntent)
@@ -110,56 +127,126 @@ class BridgeVpnService : VpnService() {
         }
     }
 
-    private fun startVpnInternal(profile: V2RayProfile, dnsServer: String, bypassLan: Boolean) {
+    private fun startVpnInternal(
+        profile: V2RayProfile,
+        dnsServer: String,
+        bypassLan: Boolean,
+        highSpeed: Boolean,
+        autoReconnect: Boolean
+    ) {
+        connectJob?.cancel()
         stopBridgeOnly()
+        unregisterNetworkCallback()
         totalUpBytes.set(0L)
         totalDownBytes.set(0L)
+        forwardedPackets.set(0L)
+        droppedPackets.set(0L)
+        bypassedPackets.set(0L)
+
+        val perfMode = if (highSpeed) PerformanceMode.HIGH_SPEED else PerformanceMode.BALANCED
+        val activeNetworkType = NetworkDiagnostics.getActiveNetworkType(this)
+
+        if (!profile.protocol.supportLevel.isNativeTunnelSupported) {
+            val errMsg = "${profile.protocol.label} supports profile import, editing, and SNI probing. Live encrypted VPN tunneling is built in for Phone Bridge (VELO_BRIDGE) profiles."
+            TunnelRuntimeBus.appendLog("VPN", errMsg, LogLevel.WARNING)
+            TunnelRuntimeBus.updateTelemetry {
+                it.copy(
+                    state = VpnConnectionState.ERROR,
+                    activeProfileId = profile.id,
+                    activeProfileName = profile.name,
+                    activeProtocol = profile.protocol,
+                    networkType = activeNetworkType,
+                    serverReachable = false,
+                    authVerified = false,
+                    tunnelVerified = false,
+                    trafficFlowing = false,
+                    errorMessage = errMsg
+                )
+            }
+            stopForegroundCompat()
+            stopSelf()
+            return
+        }
 
         TunnelRuntimeBus.updateTelemetry {
             it.copy(
                 state = VpnConnectionState.CONNECTING,
                 activeProfileId = profile.id,
                 activeProfileName = profile.name,
+                activeProtocol = profile.protocol,
                 disguiseDomain = profile.effectiveDisguiseDomain,
                 cipherLabel = profile.encryption.label,
+                networkType = activeNetworkType,
                 upSpeedBps = 0L,
                 downSpeedBps = 0L,
                 totalUpBytes = 0L,
                 totalDownBytes = 0L,
+                forwardedPackets = 0L,
+                droppedPackets = 0L,
+                bypassedPackets = 0L,
                 speedHistory = emptyList(),
+                bandwidthSamples = emptyList(),
+                highSpeedMode = highSpeed,
+                mtu = perfMode.mtu,
+                serverReachable = false,
+                authVerified = false,
+                tunnelVerified = false,
+                trafficFlowing = false,
                 errorMessage = null
             )
         }
 
-        serviceScope.launch {
+        registerNetworkObserver(profile, highSpeed, autoReconnect)
+
+        connectJob = serviceScope.launch {
             try {
                 TunnelRuntimeBus.appendLog(
                     "VPN",
-                    "Connecting to ${profile.address}:${profile.port} (${profile.protocol.label}) • Disguise: ${profile.effectiveDisguiseDomain}",
+                    "Authenticating ${profile.address}:${profile.port} • Disguise: ${profile.effectiveDisguiseDomain} • ${perfMode.label} (MTU ${perfMode.mtu})",
                     LogLevel.INFO
                 )
 
-                val measuredRtt = NetworkDiagnostics.measureProfileLatency(profile, timeoutMs = 4000)
-                if (measuredRtt == null && profile.protocol == ProtocolType.VELO_BRIDGE) {
-                    val errMsg = "Could not reach bridge server at ${profile.address}:${profile.port}. Ensure the Server Phone is running on the same Wi-Fi/Hotspot."
-                    TunnelRuntimeBus.appendLog("VPN", errMsg, LogLevel.ERROR)
-                    TunnelRuntimeBus.setVpnState(VpnConnectionState.ERROR, errMsg)
-                    stopSelf()
-                    return@launch
-                }
+                val verifiedRtt = TunPacketBridge.verifyEncryptedTunnelHandshake(
+                    vpnService = this@BridgeVpnService,
+                    profile = profile,
+                    highSpeedMode = highSpeed,
+                    timeoutMs = 4500,
+                    onStageUpdate = { reachable, authOk, tunnelOk ->
+                        TunnelRuntimeBus.setConnectionStages(
+                            serverReachable = reachable,
+                            authVerified = authOk,
+                            tunnelVerified = tunnelOk,
+                            trafficFlowing = false
+                        )
+                    }
+                )
 
                 val builder = Builder()
                     .setSession("VeloBridge (${profile.effectiveDisguiseDomain})")
-                    .setMtu(1500)
+                    .setMtu(perfMode.mtu)
                     .addAddress("10.8.0.2", 24)
-                    .addRoute("0.0.0.0", 0)
                     .addDnsServer(dnsServer.ifBlank { "1.1.1.1" })
+
+                if (bypassLan) {
+                    for (block in RouteCalculator.computePublicIpv4Routes()) {
+                        builder.addRoute(block.addressString, block.prefixLen)
+                    }
+                } else {
+                    builder.addRoute("0.0.0.0", 0)
+                }
+
+                // Capture IPv6 default route into TUN so TunPacketBridge can cleanly reject/fallback without leaking
+                runCatching {
+                    builder.addAddress("fd00:10:8::2", 64)
+                    builder.addRoute("::", 0)
+                }
 
                 runCatching { builder.addDisallowedApplication(packageName) }
 
                 val pfd = builder.establish()
                 if (pfd == null) {
                     TunnelRuntimeBus.setVpnState(VpnConnectionState.ERROR, "System declined VPN interface creation.")
+                    stopForegroundCompat()
                     stopSelf()
                     return@launch
                 }
@@ -174,28 +261,45 @@ class BridgeVpnService : VpnService() {
                     tunOutput = tunOut,
                     profile = profile,
                     bypassLan = bypassLan,
+                    highSpeedMode = highSpeed,
                     scope = serviceScope,
-                    onTrafficBytes = { up, down, flows ->
-                        totalUpBytes.addAndGet(up)
-                        totalDownBytes.addAndGet(down)
+                    onTrafficStats = { up, down, flows, fwd, drop, byp ->
+                        if (up > 0L) totalUpBytes.addAndGet(up)
+                        if (down > 0L) totalDownBytes.addAndGet(down)
                         activeFlowsCount.set(flows.toLong())
+                        forwardedPackets.set(fwd)
+                        droppedPackets.set(drop)
+                        bypassedPackets.set(byp)
                     }
                 )
                 tunBridge = bridge
                 bridge.start()
 
                 val connectedAt = System.currentTimeMillis()
+                runCatching {
+                    (application as? VeloBridgeApp)?.repository?.recordSuccessfulConnection(profile.id, connectedAt)
+                }
+
                 TunnelRuntimeBus.updateTelemetry {
                     it.copy(
                         state = VpnConnectionState.CONNECTED,
                         connectedSinceMillis = connectedAt,
-                        latencyMs = measuredRtt,
+                        lastSuccessfulConnectionMillis = connectedAt,
+                        latencyMs = verifiedRtt,
+                        networkType = NetworkDiagnostics.getActiveNetworkType(this@BridgeVpnService),
+                        highSpeedMode = highSpeed,
+                        mtu = perfMode.mtu,
+                        serverReachable = true,
+                        authVerified = true,
+                        tunnelVerified = true,
                         errorMessage = null
                     )
                 }
+                TunnelRuntimeBus.recordLatencySample(verifiedRtt, profile.name)
+                startForegroundNotification(profile, highSpeed, "Protected")
                 TunnelRuntimeBus.appendLog(
                     "VPN",
-                    "Tunnel established (${measuredRtt?.let { "${it}ms" } ?: "active"}) • SNI/Host: ${profile.effectiveDisguiseDomain}",
+                    "Mutual ECDH + AEAD tunnel verified (${verifiedRtt}ms PONG) • Host: ${profile.effectiveDisguiseDomain} • MTU ${perfMode.mtu}",
                     LogLevel.SUCCESS
                 )
 
@@ -210,27 +314,116 @@ class BridgeVpnService : VpnService() {
                         val downRate = (curDown - lastDown).coerceAtLeast(0L)
                         lastUp = curUp
                         lastDown = curDown
-                        TunnelRuntimeBus.updateTelemetry { prev ->
-                            val nextHist = (prev.speedHistory + (upRate + downRate)).takeLast(24)
-                            prev.copy(
-                                upSpeedBps = upRate,
-                                downSpeedBps = downRate,
-                                totalUpBytes = curUp,
-                                totalDownBytes = curDown,
-                                speedHistory = nextHist,
-                                activeFlowCount = activeFlowsCount.get().toInt()
-                            )
-                        }
+                        TunnelRuntimeBus.recordBandwidthSample(
+                            upBps = upRate,
+                            downBps = downRate,
+                            totalUpBytes = curUp,
+                            totalDownBytes = curDown,
+                            activeFlowCount = activeFlowsCount.get().toInt(),
+                            forwardedPackets = forwardedPackets.get(),
+                            droppedPackets = droppedPackets.get(),
+                            bypassedPackets = bypassedPackets.get()
+                        )
                     }
                 }
             } catch (t: Throwable) {
-                val msg = t.localizedMessage ?: "Tunnel startup failure"
+                val msg = t.localizedMessage ?: "Encrypted tunnel verification failed"
                 TunnelRuntimeBus.appendLog("VPN", msg, LogLevel.ERROR)
-                TunnelRuntimeBus.setVpnState(VpnConnectionState.ERROR, msg)
+                TunnelRuntimeBus.updateTelemetry {
+                    it.copy(
+                        state = VpnConnectionState.ERROR,
+                        tunnelVerified = false,
+                        trafficFlowing = false,
+                        errorMessage = msg
+                    )
+                }
                 stopBridgeOnly()
+                unregisterNetworkCallback()
+                stopForegroundCompat()
                 stopSelf()
             }
         }
+    }
+
+    private fun registerNetworkObserver(
+        profile: V2RayProfile,
+        highSpeed: Boolean,
+        autoReconnect: Boolean
+    ) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                val netType = NetworkDiagnostics.getActiveNetworkType(this@BridgeVpnService)
+                TunnelRuntimeBus.updateTelemetry { it.copy(networkType = netType) }
+                val currentState = TunnelRuntimeBus.telemetry.value.state
+                if (autoReconnect && currentState == VpnConnectionState.RECONNECTING) {
+                    serviceScope.launch {
+                        runCatching {
+                            val rtt = TunPacketBridge.verifyEncryptedTunnelHandshake(
+                                vpnService = this@BridgeVpnService,
+                                profile = profile,
+                                highSpeedMode = highSpeed,
+                                timeoutMs = 4000,
+                                onStageUpdate = { reachable, authOk, tunnelOk ->
+                                    TunnelRuntimeBus.setConnectionStages(
+                                        serverReachable = reachable,
+                                        authVerified = authOk,
+                                        tunnelVerified = tunnelOk,
+                                        trafficFlowing = TunnelRuntimeBus.telemetry.value.trafficFlowing
+                                    )
+                                }
+                            )
+                            TunnelRuntimeBus.updateTelemetry {
+                                it.copy(
+                                    state = VpnConnectionState.CONNECTED,
+                                    latencyMs = rtt,
+                                    serverReachable = true,
+                                    authVerified = true,
+                                    tunnelVerified = true,
+                                    reconnectCount = it.reconnectCount + 1,
+                                    errorMessage = null
+                                )
+                            }
+                            TunnelRuntimeBus.recordLatencySample(rtt, profile.name)
+                            TunnelRuntimeBus.appendLog("VPN", "Reconnected on $netType (${rtt}ms)", LogLevel.SUCCESS)
+                        }.onFailure { err ->
+                            TunnelRuntimeBus.updateTelemetry {
+                                it.copy(
+                                    state = VpnConnectionState.ERROR,
+                                    tunnelVerified = false,
+                                    errorMessage = err.localizedMessage ?: "Reconnect failed"
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            override fun onLost(network: Network) {
+                val currentState = TunnelRuntimeBus.telemetry.value.state
+                if (autoReconnect && currentState == VpnConnectionState.CONNECTED) {
+                    TunnelRuntimeBus.updateTelemetry {
+                        it.copy(
+                            state = VpnConnectionState.RECONNECTING,
+                            networkType = NetworkDiagnostics.getActiveNetworkType(this@BridgeVpnService)
+                        )
+                    }
+                    TunnelRuntimeBus.appendLog("VPN", "Underlying network lost; waiting to reconnect", LogLevel.WARNING)
+                }
+            }
+        }
+        runCatching {
+            cm.registerDefaultNetworkCallback(callback)
+            networkCallback = callback
+        }
+    }
+
+    private fun unregisterNetworkCallback() {
+        val cb = networkCallback ?: return
+        networkCallback = null
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        runCatching { cm.unregisterNetworkCallback(cb) }
     }
 
     private fun extractProfileFromIntent(intent: Intent?): V2RayProfile {
@@ -275,18 +468,7 @@ class BridgeVpnService : VpnService() {
         tunInterface = null
     }
 
-    private fun stopVpnInternal() {
-        stopBridgeOnly()
-        TunnelRuntimeBus.updateTelemetry {
-            it.copy(
-                state = VpnConnectionState.DISCONNECTED,
-                upSpeedBps = 0L,
-                downSpeedBps = 0L,
-                connectedSinceMillis = null,
-                activeFlowCount = 0
-            )
-        }
-        TunnelRuntimeBus.appendLog("VPN", "Tunnel disconnected", LogLevel.INFO)
+    private fun stopForegroundCompat() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {
@@ -295,7 +477,31 @@ class BridgeVpnService : VpnService() {
         }
     }
 
+    private fun stopVpnInternal() {
+        connectJob?.cancel()
+        connectJob = null
+        unregisterNetworkCallback()
+        stopBridgeOnly()
+        TunnelRuntimeBus.updateTelemetry {
+            it.copy(
+                state = VpnConnectionState.DISCONNECTED,
+                upSpeedBps = 0L,
+                downSpeedBps = 0L,
+                connectedSinceMillis = null,
+                activeFlowCount = 0,
+                serverReachable = false,
+                authVerified = false,
+                tunnelVerified = false,
+                trafficFlowing = false,
+                errorMessage = null
+            )
+        }
+        TunnelRuntimeBus.appendLog("VPN", "Tunnel disconnected", LogLevel.INFO)
+        stopForegroundCompat()
+    }
+
     override fun onDestroy() {
+        unregisterNetworkCallback()
         stopBridgeOnly()
         serviceScope.cancel()
         super.onDestroy()
@@ -324,12 +530,16 @@ class BridgeVpnService : VpnService() {
         const val EXTRA_FINGERPRINT = "extra_fingerprint"
         const val EXTRA_DNS = "extra_dns"
         const val EXTRA_BYPASS_LAN = "extra_bypass_lan"
+        const val EXTRA_HIGH_SPEED = "extra_high_speed"
+        const val EXTRA_AUTO_RECONNECT = "extra_auto_reconnect"
 
         fun createStartIntent(
             context: Context,
             profile: V2RayProfile,
             dnsServer: String,
-            bypassLan: Boolean
+            bypassLan: Boolean,
+            highSpeedMode: Boolean,
+            autoReconnect: Boolean = true
         ): Intent = Intent(context, BridgeVpnService::class.java).apply {
             action = ACTION_START
             putExtra(EXTRA_PROFILE_ID, profile.id)
@@ -349,6 +559,8 @@ class BridgeVpnService : VpnService() {
             putExtra(EXTRA_FINGERPRINT, profile.tlsFingerprint.name)
             putExtra(EXTRA_DNS, dnsServer)
             putExtra(EXTRA_BYPASS_LAN, bypassLan)
+            putExtra(EXTRA_HIGH_SPEED, highSpeedMode)
+            putExtra(EXTRA_AUTO_RECONNECT, autoReconnect)
         }
     }
 }

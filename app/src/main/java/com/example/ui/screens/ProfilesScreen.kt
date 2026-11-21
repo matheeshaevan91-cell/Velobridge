@@ -4,6 +4,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.horizontalScroll
@@ -26,6 +27,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
@@ -33,13 +35,14 @@ import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.NetworkPing
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.QrCode2
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarOutline
 import androidx.compose.material.icons.filled.WifiFind
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
@@ -64,24 +67,37 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.domain.model.DiscoveredLanServer
+import com.example.domain.model.ProfileSortOption
 import com.example.domain.model.ProtocolType
 import com.example.domain.model.V2RayProfile
+import com.example.ui.components.ConfirmActionDialog
 import com.example.ui.components.DisguiseDomainPill
 import com.example.ui.components.ProfileShareDialog
-import com.example.ui.theme.AlertAmber
-import com.example.ui.theme.DangerCoral
+import com.example.ui.components.ProtocolSupportBadge
+import com.example.ui.components.VeloCard
+import com.example.ui.components.VeloEmptyStateCard
+import com.example.ui.components.VeloScreenHeader
+import com.example.ui.components.formatRelativeTimestamp
+import com.example.ui.theme.LocalVeloColors
 import com.example.ui.theme.MonoDataStyle
-import com.example.ui.theme.ShieldEmerald
-import com.example.ui.theme.SignalCyan
+import com.example.ui.viewmodel.ProfileFilterState
 
 @Composable
 fun ProfilesScreen(
     profiles: List<V2RayProfile>,
+    totalProfilesCount: Int,
     activeProfileId: String?,
+    filterState: ProfileFilterState,
     isScanningLan: Boolean,
     lanServers: List<DiscoveredLanServer>,
     isTestingAll: Boolean,
+    onSearchChange: (String) -> Unit,
+    onProtocolFilterChange: (ProtocolType?) -> Unit,
+    onToggleFavoritesOnly: () -> Unit,
+    onSortChange: (ProfileSortOption) -> Unit,
     onSelectProfile: (String) -> Unit,
+    onToggleFavorite: (V2RayProfile) -> Unit,
+    onDuplicateProfile: (V2RayProfile) -> Unit,
     onCreateProfile: () -> Unit,
     onEditProfile: (String) -> Unit,
     onDeleteProfile: (String) -> Unit,
@@ -89,19 +105,21 @@ fun ProfilesScreen(
     onTestAll: () -> Unit,
     onImportText: (String, (Boolean, String) -> Unit) -> Unit,
     onImportFileUri: (Context, Uri, (Boolean, String) -> Unit) -> Unit,
+    onImportQrImageUri: (Context, Uri, (Boolean, String) -> Unit) -> Unit,
     onScanLanServers: () -> Unit,
     onAdoptLanServer: (DiscoveredLanServer) -> Unit,
     onNotify: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    var searchQuery by remember { mutableStateOf("") }
-    var selectedProtocolFilter by remember { mutableStateOf<ProtocolType?>(null) }
+    val velo = LocalVeloColors.current
+
     var showImportDialog by remember { mutableStateOf(false) }
     var showLanDialog by remember { mutableStateOf(false) }
     var importInputText by remember { mutableStateOf("") }
     var importErrorText by remember { mutableStateOf<String?>(null) }
     var shareTargetProfile by remember { mutableStateOf<V2RayProfile?>(null) }
+    var deleteTargetProfile by remember { mutableStateOf<V2RayProfile?>(null) }
 
     val openJsonLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -111,14 +129,11 @@ fun ProfilesScreen(
         }
     }
 
-    val filteredProfiles = remember(profiles, searchQuery, selectedProtocolFilter) {
-        profiles.filter { profile ->
-            val matchesQuery = searchQuery.isBlank() ||
-                profile.name.contains(searchQuery, ignoreCase = true) ||
-                profile.address.contains(searchQuery, ignoreCase = true) ||
-                profile.effectiveDisguiseDomain.contains(searchQuery, ignoreCase = true)
-            val matchesProto = selectedProtocolFilter == null || profile.protocol == selectedProtocolFilter
-            matchesQuery && matchesProto
+    val pickQrImageLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            onImportQrImageUri(context, uri) { _, msg -> onNotify(msg) }
         }
     }
 
@@ -129,103 +144,116 @@ fun ProfilesScreen(
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .widthIn(max = 680.dp),
+                .widthIn(max = 720.dp)
+                .testTag("profiles_lazy_column"),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 92.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column {
-                        Text(
-                            text = "Configurations",
-                            style = MaterialTheme.typography.headlineMedium
-                        )
-                        Text(
-                            text = "Import V2Ray links, JSON files, or pair a nearby phone",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    if (profiles.isNotEmpty()) {
-                        OutlinedButton(
-                            onClick = onTestAll,
-                            enabled = !isTestingAll,
-                            modifier = Modifier.testTag("test_all_ping_button")
-                        ) {
-                            if (isTestingAll) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(16.dp),
-                                    strokeWidth = 2.dp
-                                )
-                            } else {
-                                Icon(Icons.Filled.Speed, contentDescription = null, modifier = Modifier.size(16.dp))
+                VeloScreenHeader(
+                    title = "Profiles",
+                    subtitle = "Import multi-line links, Xray JSON, QR images, or pair a LAN Phone Server",
+                    trailing = if (totalProfilesCount > 0) {
+                        {
+                            OutlinedButton(
+                                onClick = onTestAll,
+                                enabled = !isTestingAll,
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                                modifier = Modifier.testTag("test_all_ping_button")
+                            ) {
+                                if (isTestingAll) {
+                                    CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                                } else {
+                                    Icon(Icons.Filled.Speed, contentDescription = null, modifier = Modifier.size(15.dp))
+                                }
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(if (isTestingAll) "Testing…" else "Test All")
                             }
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(if (isTestingAll) "Testing…" else "Test All")
+                        }
+                    } else null
+                )
+            }
+
+            // Primary Import & Pairing Bar
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                importInputText = ""
+                                importErrorText = null
+                                showImportDialog = true
+                            },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("import_paste_button")
+                        ) {
+                            Icon(Icons.Filled.ContentPaste, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(5.dp))
+                            Text("Paste / Bulk", maxLines = 1)
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                openJsonLauncher.launch(arrayOf("application/json", "text/plain", "*/*"))
+                            },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("import_json_file_button")
+                        ) {
+                            Icon(Icons.Filled.FileOpen, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(5.dp))
+                            Text("JSON File", maxLines = 1)
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                pickQrImageLauncher.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                )
+                            },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("import_qr_image_button")
+                        ) {
+                            Icon(Icons.Filled.QrCodeScanner, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(5.dp))
+                            Text("QR Image", maxLines = 1)
+                        }
+                        Button(
+                            onClick = {
+                                showLanDialog = true
+                                onScanLanServers()
+                            },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("find_phone_server_button")
+                        ) {
+                            Icon(Icons.Filled.WifiFind, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(5.dp))
+                            Text("Pair LAN", maxLines = 1)
                         }
                     }
                 }
             }
 
-            // Import Action Bar
-            item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    OutlinedButton(
-                        onClick = {
-                            importInputText = ""
-                            importErrorText = null
-                            showImportDialog = true
-                        },
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("import_paste_button")
-                    ) {
-                        Icon(Icons.Filled.ContentPaste, contentDescription = null, modifier = Modifier.size(17.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Paste URI", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-                    OutlinedButton(
-                        onClick = {
-                            openJsonLauncher.launch(arrayOf("application/json", "text/plain", "*/*"))
-                        },
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("import_json_file_button")
-                    ) {
-                        Icon(Icons.Filled.FileOpen, contentDescription = null, modifier = Modifier.size(17.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("JSON File", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-                    Button(
-                        onClick = {
-                            showLanDialog = true
-                            onScanLanServers()
-                        },
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("find_phone_server_button")
-                    ) {
-                        Icon(Icons.Filled.WifiFind, contentDescription = null, modifier = Modifier.size(17.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Pair LAN", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-                }
-            }
-
-            if (profiles.isNotEmpty()) {
+            if (totalProfilesCount > 0) {
                 item {
                     OutlinedTextField(
-                        value = searchQuery,
-                        onValueChange = { searchQuery = it },
+                        value = filterState.searchQuery,
+                        onValueChange = onSearchChange,
                         leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
-                        placeholder = { Text("Search name, host, or disguise domain") },
+                        placeholder = { Text("Search name, host, protocol, or disguise") },
                         singleLine = true,
                         modifier = Modifier
                             .fillMaxWidth()
@@ -233,6 +261,7 @@ fun ProfilesScreen(
                     )
                 }
 
+                // Protocol & Favorite filters
                 item {
                     Row(
                         modifier = Modifier
@@ -241,50 +270,95 @@ fun ProfilesScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         FilterChip(
-                            selected = selectedProtocolFilter == null,
-                            onClick = { selectedProtocolFilter = null },
-                            label = { Text("All (${profiles.size})") }
+                            selected = filterState.favoritesOnly,
+                            onClick = onToggleFavoritesOnly,
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = if (filterState.favoritesOnly) Icons.Filled.Star else Icons.Filled.StarOutline,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            },
+                            label = { Text("Favorites") },
+                            modifier = Modifier.testTag("filter_favorites_chip")
+                        )
+                        FilterChip(
+                            selected = filterState.protocolFilter == null,
+                            onClick = { onProtocolFilterChange(null) },
+                            label = { Text("All ($totalProfilesCount)") },
+                            modifier = Modifier.testTag("filter_protocol_all")
                         )
                         ProtocolType.entries.forEach { proto ->
                             FilterChip(
-                                selected = selectedProtocolFilter == proto,
+                                selected = filterState.protocolFilter == proto,
                                 onClick = {
-                                    selectedProtocolFilter = if (selectedProtocolFilter == proto) null else proto
+                                    onProtocolFilterChange(if (filterState.protocolFilter == proto) null else proto)
                                 },
-                                label = { Text(proto.label) }
+                                label = { Text(proto.label) },
+                                modifier = Modifier.testTag("filter_protocol_${proto.name.lowercase()}")
+                            )
+                        }
+                    }
+                }
+
+                // Sort options
+                item {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Sort:",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        ProfileSortOption.entries.forEach { option ->
+                            FilterChip(
+                                selected = filterState.sortOption == option,
+                                onClick = { onSortChange(option) },
+                                label = { Text(option.label) },
+                                modifier = Modifier.testTag("sort_${option.name.lowercase()}")
                             )
                         }
                     }
                 }
             }
 
-            if (filteredProfiles.isEmpty()) {
+            if (profiles.isEmpty()) {
                 item {
-                    EmptyProfilesCard(
-                        hasProfiles = profiles.isNotEmpty(),
-                        onPasteClick = {
-                            importInputText = ""
-                            importErrorText = null
-                            showImportDialog = true
+                    VeloEmptyStateCard(
+                        icon = Icons.Filled.PhoneAndroid,
+                        title = if (totalProfilesCount > 0) "No Matching Configurations" else "No Profiles Yet",
+                        subtitle = if (totalProfilesCount > 0) {
+                            "Clear your search or filter chips to view all configurations."
+                        } else {
+                            "Import VLESS, VMess, Trojan, Shadowsocks, velobridge:// links, or discover a Phone Bridge server on Wi-Fi."
                         },
-                        onPairLanClick = {
-                            showLanDialog = true
-                            onScanLanServers()
-                        },
-                        onCreateClick = onCreateProfile
+                        primaryLabel = if (totalProfilesCount > 0) null else "Find Nearby Phone Server",
+                        onPrimaryClick = if (totalProfilesCount > 0) null else {
+                            {
+                                showLanDialog = true
+                                onScanLanServers()
+                            }
+                        }
                     )
                 }
             } else {
-                items(filteredProfiles, key = { it.id }) { profile ->
+                items(profiles, key = { it.id }) { profile ->
                     val isActive = profile.id == activeProfileId
                     ProfileCard(
                         profile = profile,
                         isActive = isActive,
                         onSelect = { onSelectProfile(profile.id) },
+                        onToggleFavorite = { onToggleFavorite(profile) },
                         onPing = { onPingProfile(profile) },
                         onShare = { shareTargetProfile = profile },
+                        onDuplicate = { onDuplicateProfile(profile) },
                         onEdit = { onEditProfile(profile.id) },
-                        onDelete = { onDeleteProfile(profile.id) }
+                        onDelete = { deleteTargetProfile = profile }
                     )
                 }
             }
@@ -292,8 +366,6 @@ fun ProfilesScreen(
 
         FloatingActionButton(
             onClick = onCreateProfile,
-            containerColor = MaterialTheme.colorScheme.primary,
-            contentColor = MaterialTheme.colorScheme.onPrimary,
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(16.dp)
@@ -306,11 +378,11 @@ fun ProfilesScreen(
     if (showImportDialog) {
         AlertDialog(
             onDismissRequest = { showImportDialog = false },
-            title = { Text("Import V2Ray Configuration") },
+            title = { Text("Import Configuration") },
             text = {
                 Column {
                     Text(
-                        text = "Paste vless://, vmess://, trojan://, ss://, velobridge:// links or full Xray JSON.",
+                        text = "Paste one or multiple vless://, vmess://, trojan://, ss://, velobridge:// links, or Xray JSON.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -321,9 +393,9 @@ fun ProfilesScreen(
                             importInputText = it
                             importErrorText = null
                         },
-                        label = { Text("Config URI or JSON") },
+                        label = { Text("URIs or Xray JSON") },
                         minLines = 4,
-                        maxLines = 7,
+                        maxLines = 8,
                         textStyle = MonoDataStyle,
                         modifier = Modifier
                             .fillMaxWidth()
@@ -334,7 +406,7 @@ fun ProfilesScreen(
                         Text(
                             text = importErrorText.orEmpty(),
                             style = MaterialTheme.typography.bodySmall,
-                            color = DangerCoral
+                            color = velo.danger
                         )
                     }
                     Spacer(modifier = Modifier.height(8.dp))
@@ -369,14 +441,10 @@ fun ProfilesScreen(
                         }
                     },
                     modifier = Modifier.testTag("confirm_import_button")
-                ) {
-                    Text("Import")
-                }
+                ) { Text("Import") }
             },
             dismissButton = {
-                TextButton(onClick = { showImportDialog = false }) {
-                    Text("Cancel")
-                }
+                TextButton(onClick = { showImportDialog = false }) { Text("Cancel") }
             }
         )
     }
@@ -384,11 +452,11 @@ fun ProfilesScreen(
     if (showLanDialog) {
         AlertDialog(
             onDismissRequest = { showLanDialog = false },
-            title = { Text("Nearby Phone Bridge Servers") },
+            title = { Text("Nearby Phone Bridges") },
             text = {
                 Column(modifier = Modifier.fillMaxWidth()) {
                     Text(
-                        text = "Make sure the Old Phone has Bridge Server turned ON and both phones share the same Wi-Fi or Hotspot.",
+                        text = "Ensure the Server Phone has Bridge Server turned ON on the same Wi-Fi or Hotspot.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -401,7 +469,7 @@ fun ProfilesScreen(
                                 .fillMaxWidth()
                                 .padding(vertical = 16.dp)
                         ) {
-                            CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.5.dp)
+                            CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
                             Spacer(modifier = Modifier.width(12.dp))
                             Text("Scanning local network…")
                         }
@@ -412,13 +480,10 @@ fun ProfilesScreen(
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Column(modifier = Modifier.padding(14.dp)) {
-                                Text(
-                                    text = "No phone servers responded yet.",
-                                    style = MaterialTheme.typography.titleSmall
-                                )
+                                Text("No phone servers found.", style = MaterialTheme.typography.titleSmall)
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
-                                    text = "You can also scan/copy the velobridge:// pairing URI shown on the Server Phone's Bridge tab and paste it here.",
+                                    text = "You can also scan a pairing QR image or copy the velobridge:// link from the Server Phone.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -430,7 +495,7 @@ fun ProfilesScreen(
                                 Surface(
                                     shape = MaterialTheme.shapes.small,
                                     color = MaterialTheme.colorScheme.surfaceVariant,
-                                    border = BorderStroke(1.dp, SignalCyan.copy(alpha = 0.4f)),
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)),
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
                                     Row(
@@ -440,7 +505,7 @@ fun ProfilesScreen(
                                         Icon(
                                             Icons.Filled.PhoneAndroid,
                                             contentDescription = null,
-                                            tint = SignalCyan
+                                            tint = MaterialTheme.colorScheme.primary
                                         )
                                         Spacer(modifier = Modifier.width(10.dp))
                                         Column(modifier = Modifier.weight(1f)) {
@@ -455,10 +520,9 @@ fun ProfilesScreen(
                                             onClick = {
                                                 onAdoptLanServer(server)
                                                 showLanDialog = false
-                                            }
-                                        ) {
-                                            Text("Pair")
-                                        }
+                                            },
+                                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                                        ) { Text("Pair") }
                                     }
                                 }
                             }
@@ -467,14 +531,10 @@ fun ProfilesScreen(
                 }
             },
             confirmButton = {
-                Button(onClick = onScanLanServers, enabled = !isScanningLan) {
-                    Text("Rescan")
-                }
+                Button(onClick = onScanLanServers, enabled = !isScanningLan) { Text("Rescan") }
             },
             dismissButton = {
-                TextButton(onClick = { showLanDialog = false }) {
-                    Text("Close")
-                }
+                TextButton(onClick = { showLanDialog = false }) { Text("Close") }
             }
         )
     }
@@ -486,69 +546,15 @@ fun ProfilesScreen(
             onCopied = { msg -> onNotify(msg) }
         )
     }
-}
 
-@Composable
-private fun EmptyProfilesCard(
-    hasProfiles: Boolean,
-    onPasteClick: () -> Unit,
-    onPairLanClick: () -> Unit,
-    onCreateClick: () -> Unit
-) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-        shape = MaterialTheme.shapes.large,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(24.dp)
-        ) {
-            Icon(
-                imageVector = Icons.Filled.PhoneAndroid,
-                contentDescription = null,
-                tint = SignalCyan,
-                modifier = Modifier.size(44.dp)
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-            Text(
-                text = if (hasProfiles) "No Matching Profiles" else "Add Your First Connection",
-                style = MaterialTheme.typography.titleLarge
-            )
-            Spacer(modifier = Modifier.height(6.dp))
-            Text(
-                text = if (hasProfiles) {
-                    "Try clearing your search or protocol filter."
-                } else {
-                    "Import a custom V2Ray config (VLESS, VMess, Trojan, SS, JSON) or pair directly with an old phone running VeloBridge Server."
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            if (!hasProfiles) {
-                Spacer(modifier = Modifier.height(16.dp))
-                Button(onClick = onPairLanClick, modifier = Modifier.fillMaxWidth()) {
-                    Icon(Icons.Filled.WifiFind, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Find Nearby Server Phone")
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    OutlinedButton(onClick = onPasteClick, modifier = Modifier.weight(1f)) {
-                        Text("Paste URI / JSON")
-                    }
-                    OutlinedButton(onClick = onCreateClick, modifier = Modifier.weight(1f)) {
-                        Text("Manual Setup")
-                    }
-                }
-            }
-        }
+    deleteTargetProfile?.let { target ->
+        ConfirmActionDialog(
+            title = "Delete Configuration?",
+            message = "Remove '${target.name}' (${target.address}:${target.port}) from your saved profiles?",
+            confirmLabel = "Delete",
+            onConfirm = { onDeleteProfile(target.id) },
+            onDismiss = { deleteTargetProfile = null }
+        )
     }
 }
 
@@ -557,47 +563,56 @@ private fun ProfileCard(
     profile: V2RayProfile,
     isActive: Boolean,
     onSelect: () -> Unit,
+    onToggleFavorite: () -> Unit,
     onPing: () -> Unit,
     onShare: () -> Unit,
+    onDuplicate: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit
 ) {
-    Card(
+    val velo = LocalVeloColors.current
+    VeloCard(
         onClick = onSelect,
-        colors = CardDefaults.cardColors(
-            containerColor = if (isActive) {
-                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.28f)
-            } else {
-                MaterialTheme.colorScheme.surface
-            }
-        ),
-        border = BorderStroke(
-            width = if (isActive) 1.5.dp else 1.dp,
-            color = if (isActive) SignalCyan else MaterialTheme.colorScheme.outline
-        ),
-        shape = MaterialTheme.shapes.medium,
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag("profile_card_${profile.id}")
+        containerColor = if (isActive) {
+            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.28f)
+        } else {
+            MaterialTheme.colorScheme.surface
+        },
+        borderColor = if (isActive) {
+            MaterialTheme.colorScheme.primary.copy(alpha = 0.75f)
+        } else {
+            MaterialTheme.colorScheme.outline
+        },
+        modifier = Modifier.testTag("profile_card_${profile.id}")
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                verticalAlignment = Alignment.Top
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.weight(1f)
                 ) {
+                    IconButton(
+                        onClick = onToggleFavorite,
+                        modifier = Modifier.testTag("favorite_profile_${profile.id}")
+                    ) {
+                        Icon(
+                            imageVector = if (profile.isFavorite) Icons.Filled.Star else Icons.Filled.StarOutline,
+                            contentDescription = if (profile.isFavorite) "Remove favorite" else "Mark favorite",
+                            tint = if (profile.isFavorite) velo.warning else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                     if (isActive) {
                         Icon(
                             Icons.Filled.CheckCircle,
-                            contentDescription = "Selected profile",
-                            tint = ShieldEmerald,
-                            modifier = Modifier.size(20.dp)
+                            contentDescription = "Active profile",
+                            tint = velo.success,
+                            modifier = Modifier.size(18.dp)
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
                     }
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
@@ -608,35 +623,40 @@ private fun ProfileCard(
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            text = "${profile.address}:${profile.port}",
+                            text = "${profile.address}:${profile.port} • ${profile.encryption.label}",
                             style = MonoDataStyle.copy(fontSize = MaterialTheme.typography.labelSmall.fontSize),
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
+                        Text(
+                            text = "Last connected: ${formatRelativeTimestamp(profile.lastConnectedAt)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
 
-                // Protocol + Latency badge
                 Column(horizontalAlignment = Alignment.End) {
                     Surface(
                         shape = MaterialTheme.shapes.small,
-                        color = MaterialTheme.colorScheme.surfaceVariant
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
                     ) {
                         Text(
                             text = profile.protocol.badge,
                             style = MaterialTheme.typography.labelSmall,
-                            color = SignalCyan,
+                            color = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                         )
                     }
                     Spacer(modifier = Modifier.height(4.dp))
-                    val latText = profile.latencyMs?.let { "${it} ms" } ?: "Untested"
+                    val latText = profile.latencyMs?.let { "$it ms" } ?: "Untested"
                     val latColor = when {
                         profile.latencyMs == null -> MaterialTheme.colorScheme.onSurfaceVariant
-                        profile.latencyMs < 120 -> ShieldEmerald
-                        profile.latencyMs < 280 -> AlertAmber
-                        else -> DangerCoral
+                        profile.latencyMs < 120 -> velo.success
+                        profile.latencyMs < 280 -> velo.warning
+                        else -> velo.danger
                     }
                     Text(
                         text = latText,
@@ -646,34 +666,43 @@ private fun ProfileCard(
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(8.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 DisguiseDomainPill(
                     presetId = profile.disguisePresetId,
                     domain = profile.effectiveDisguiseDomain
                 )
-                Row {
-                    IconButton(onClick = onPing) {
-                        Icon(Icons.Filled.NetworkPing, contentDescription = "Ping server", modifier = Modifier.size(20.dp))
-                    }
-                    IconButton(onClick = onShare) {
-                        Icon(Icons.Filled.QrCode2, contentDescription = "Share QR or JSON", modifier = Modifier.size(20.dp))
-                    }
-                    IconButton(onClick = onEdit) {
-                        Icon(Icons.Filled.Edit, contentDescription = "Edit profile", modifier = Modifier.size(20.dp))
-                    }
-                    IconButton(onClick = onDelete) {
-                        Icon(
-                            Icons.Filled.DeleteOutline,
-                            contentDescription = "Delete profile",
-                            tint = DangerCoral,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
+                ProtocolSupportBadge(protocol = profile.protocol)
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                IconButton(onClick = onPing) {
+                    Icon(Icons.Filled.NetworkPing, contentDescription = "Ping server", modifier = Modifier.size(19.dp))
+                }
+                IconButton(onClick = onShare) {
+                    Icon(Icons.Filled.QrCode2, contentDescription = "Share QR or JSON", modifier = Modifier.size(19.dp))
+                }
+                IconButton(onClick = onDuplicate) {
+                    Icon(Icons.Filled.ContentCopy, contentDescription = "Duplicate profile", modifier = Modifier.size(19.dp))
+                }
+                IconButton(onClick = onEdit) {
+                    Icon(Icons.Filled.Edit, contentDescription = "Edit profile", modifier = Modifier.size(19.dp))
+                }
+                IconButton(onClick = onDelete) {
+                    Icon(
+                        Icons.Filled.DeleteOutline,
+                        contentDescription = "Delete profile",
+                        tint = velo.danger,
+                        modifier = Modifier.size(19.dp)
+                    )
                 }
             }
         }
