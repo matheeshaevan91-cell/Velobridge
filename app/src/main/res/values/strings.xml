@@ -1,0 +1,19 @@
+<resources>
+    <string name="app_name">VeloBridge</string>
+    <string name="vpn_notification_channel_name">VeloBridge Tunnel</string>
+    <string name="server_notification_channel_name">VeloBridge Server</string>
+    <string name="nav_connect">Connect</string>
+    <string name="nav_profiles">Profiles</string>
+    <string name="nav_bridge">Bridge</string>
+    <string name="nav_disguise">Disguise</string>
+    <string name="status_connected">Protected &amp; Bridged</string>
+    <string name="status_connecting">Establishing Tunnel…</string>
+    <string name="status_disconnected">Not Connected</string>
+    <string name="server_running">Bridge Server Active</string>
+    <string name="server_stopped">Bridge Server Standby</string>
+    <string name="cd_bridge_hero">Illustration of two smartphones linked through an encrypted disguise prism</string>
+    <string name="cd_power_button">Toggle encrypted VPN connection</string>
+    <string name="cd_server_power">Toggle Phone Bridge Server</string>
+    <string name="cd_qr_code">Scannable pairing QR code</string>
+    <string name="cd_back">Navigate back</string>
+</resources>

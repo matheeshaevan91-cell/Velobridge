@@ -1,0 +1,6 @@
+{
+  "name": "VeloBridge",
+  "description": "A beginner-friendly V2Ray server and client app with custom domain disguise, secure encryption, and phone-to-phone private network bridging.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
